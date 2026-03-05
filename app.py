@@ -9,10 +9,11 @@ import requests
 import urllib.parse
 import uuid
 import io
+import hashlib
 from datetime import datetime
 from supabase import create_client
 
-st.set_page_config(page_title="C4C Route Optimizer", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="Campaign Route Optimizer", page_icon="🗺️", layout="wide")
 
 COLORS     = ["red","blue","green","orange","purple","darkred","cadetblue","darkgreen"]
 HEX_COLORS = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#c0392b","#5f9ea0","#27ae60"]
@@ -24,18 +25,106 @@ KM_TO_MILES = 0.621371
 def get_supabase():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
 def load_data(key):
+    cid = st.session_state.get("campaign_id", "default")
+    scoped_key = f"{cid}_{key}"
     try:
-        res = get_supabase().table("campaign_data").select("data").eq("id", key).execute()
+        res = get_supabase().table("campaign_data").select("data").eq("id", scoped_key).execute()
         return res.data[0]["data"] if res.data else []
     except:
         return []
 
 def save_data(key, value):
+    cid = st.session_state.get("campaign_id", "default")
+    scoped_key = f"{cid}_{key}"
     try:
-        get_supabase().table("campaign_data").upsert({"id": key, "data": value, "updated_at": "now()"}).execute()
+        get_supabase().table("campaign_data").upsert({"id": scoped_key, "data": value, "updated_at": "now()"}).execute()
     except Exception as e:
         st.error(f"Failed to save: {e}")
+
+def create_account(campaign_name, email, password):
+    try:
+        sb = get_supabase()
+        existing = sb.table("campaign_accounts").select("id").eq("email", email).execute()
+        if existing.data:
+            return None, "An account with that email already exists."
+        cid = str(uuid.uuid4())
+        sb.table("campaign_accounts").insert({
+            "id": cid,
+            "campaign_name": campaign_name,
+            "email": email.lower().strip(),
+            "password_hash": hash_password(password),
+        }).execute()
+        return cid, None
+    except Exception as e:
+        return None, str(e)
+
+def login_account(email, password):
+    try:
+        sb = get_supabase()
+        res = sb.table("campaign_accounts").select("*").eq("email", email.lower().strip()).execute()
+        if not res.data:
+            return None, None, "No account found with that email."
+        acct = res.data[0]
+        if acct["password_hash"] != hash_password(password):
+            return None, None, "Incorrect password."
+        return acct["id"], acct["campaign_name"], None
+    except Exception as e:
+        return None, None, str(e)
+
+# ── Auth gate ──────────────────────────────────────────────────────────────────
+if "campaign_id" not in st.session_state:
+    st.set_page_config(page_title="Campaign Route Optimizer", page_icon="🗺️", layout="centered")
+    st.title("🗺️ Campaign Yard Sign Route Optimizer")
+    st.caption("Manage volunteers, plan delivery runs, and track every sign on the map.")
+    st.divider()
+
+    auth_tab, signup_tab = st.tabs(["🔑 Log In", "✨ Sign Up"])
+
+    with auth_tab:
+        st.subheader("Log in to your campaign")
+        login_email = st.text_input("Email", key="login_email", placeholder="you@campaign.com")
+        login_pw    = st.text_input("Password", key="login_pw", type="password")
+        if st.button("Log In", type="primary", use_container_width=True):
+            if login_email and login_pw:
+                cid, cname, err = login_account(login_email, login_pw)
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state.campaign_id   = cid
+                    st.session_state.campaign_name = cname
+                    st.session_state.logged_in     = True
+                    st.rerun()
+            else:
+                st.warning("Please enter your email and password.")
+
+    with signup_tab:
+        st.subheader("Create a new campaign account")
+        su_campaign = st.text_input("Campaign name", key="su_campaign", placeholder="Smith for State Senate")
+        su_email    = st.text_input("Email", key="su_email", placeholder="you@campaign.com")
+        su_pw       = st.text_input("Password", key="su_pw", type="password")
+        su_pw2      = st.text_input("Confirm password", key="su_pw2", type="password")
+        if st.button("Create Account", type="primary", use_container_width=True):
+            if not su_campaign or not su_email or not su_pw:
+                st.warning("All fields are required.")
+            elif su_pw != su_pw2:
+                st.error("Passwords do not match.")
+            elif len(su_pw) < 6:
+                st.error("Password must be at least 6 characters.")
+            else:
+                cid, err = create_account(su_campaign, su_email, su_pw)
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state.campaign_id   = cid
+                    st.session_state.campaign_name = su_campaign
+                    st.session_state.logged_in     = True
+                    st.success(f"Account created! Welcome, {su_campaign}.")
+                    st.rerun()
+    st.stop()
 
 # ── OSRM ───────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
@@ -210,6 +299,17 @@ def get_master_by_id(aid):
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
+
+cname = st.session_state.get("campaign_name", "Campaign")
+title_col, logout_col = st.columns([8, 1])
+with title_col:
+    st.title(f"🗺️ {cname} — Yard Sign Route Optimizer")
+with logout_col:
+    st.write("")
+    if st.button("Log Out", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
 
 tab_roster, tab_addresses, tab_run, tab_map, tab_routes, tab_emails = st.tabs([
     "👥 Volunteers", "🗳️ Constituents", "🚐 Delivery Run", "🗺️ Map", "📍 Routes", "📧 Emails & Texts"
@@ -774,7 +874,20 @@ with tab_run:
                     "clusters": clusters,
                     "timestamp": datetime.now().strftime("%b %d, %Y at %I:%M %p")
                 }
-                st.session_state.routes = []
+                # Build soft routes for emails/texts (no road geometry)
+                proximity_routes = []
+                for vi, vol in enumerate(vol_results):
+                    if not clusters[vi]: continue
+                    proximity_routes.append({
+                        "volunteer": vol,
+                        "stops": clusters[vi],
+                        "distance_km": 0,
+                        "distance_miles": "—",
+                        "road_geometry": None,
+                        "color": COLORS[vi%len(COLORS)],
+                        "hex": HEX_COLORS[vi%len(HEX_COLORS)],
+                    })
+                st.session_state.routes = proximity_routes
                 st.toast(f"Proximity map ready — {len(del_results)} stops grouped by nearest volunteer", icon="🗺️")
 
 # ══════════════════════════════════════════════════════════════════════════════
