@@ -5,6 +5,8 @@ from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import pandas as pd
 import math
+import requests
+import json
 from supabase import create_client
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -16,6 +18,8 @@ st.set_page_config(
 
 COLORS = ["red", "blue", "green", "orange", "purple", "darkred", "cadetblue", "darkgreen"]
 HEX_COLORS = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#c0392b","#5f9ea0","#27ae60"]
+
+OSRM_BASE = "https://router.project-osrm.org"
 
 # ── Supabase ───────────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -39,6 +43,60 @@ def save_data(key, value):
     except Exception as e:
         st.error(f"Failed to save: {e}")
 
+# ── OSRM helpers ───────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def osrm_distance(a, b):
+    """Driving distance in km between two (lat, lng) points via OSRM."""
+    try:
+        url = f"{OSRM_BASE}/route/v1/driving/{a[1]},{a[0]};{b[1]},{b[0]}?overview=false"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        if data["code"] == "Ok":
+            return data["routes"][0]["distance"] / 1000  # meters → km
+    except:
+        pass
+    # Fallback to haversine if OSRM fails
+    return haversine(a, b)
+
+@st.cache_data(show_spinner=False)
+def osrm_route_geometry(waypoints):
+    """
+    Get the actual road polyline for a list of (lat, lng) waypoints.
+    Returns list of [lat, lng] pairs for folium.
+    """
+    try:
+        coords = ";".join(f"{lng},{lat}" for lat, lng in waypoints)
+        url = f"{OSRM_BASE}/route/v1/driving/{coords}?overview=full&geometries=geojson"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if data["code"] == "Ok":
+            # GeoJSON coords are [lng, lat], flip to [lat, lng] for folium
+            return [[pt[1], pt[0]] for pt in data["routes"][0]["geometry"]["coordinates"]]
+    except:
+        pass
+    # Fallback: straight lines
+    return [[lat, lng] for lat, lng in waypoints]
+
+@st.cache_data(show_spinner=False)
+def osrm_matrix(points):
+    """
+    Get full driving distance matrix for a list of (lat, lng) points.
+    Returns 2D list of distances in km.
+    """
+    try:
+        coords = ";".join(f"{lng},{lat}" for lat, lng in points)
+        url = f"{OSRM_BASE}/table/v1/driving/{coords}?annotations=distance"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if data["code"] == "Ok":
+            matrix = data["distances"]
+            return [[d / 1000 for d in row] for row in matrix]
+    except:
+        pass
+    # Fallback to haversine matrix
+    n = len(points)
+    return [[haversine(points[i], points[j]) for j in range(n)] for i in range(n)]
+
 # ── TSP helpers ────────────────────────────────────────────────────────────────
 def haversine(a, b):
     R = 6371
@@ -48,8 +106,8 @@ def haversine(a, b):
     h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
     return R * 2 * math.asin(math.sqrt(h))
 
-def nearest_neighbor(points):
-    n = len(points)
+def nearest_neighbor_matrix(dist_matrix):
+    n = len(dist_matrix)
     if n <= 1:
         return list(range(n))
     visited = [False] * n
@@ -59,48 +117,40 @@ def nearest_neighbor(points):
         last = route[-1]
         best, best_d = -1, float("inf")
         for j in range(n):
-            if not visited[j]:
-                d = haversine(points[last], points[j])
-                if d < best_d:
-                    best_d, best = d, j
+            if not visited[j] and dist_matrix[last][j] < best_d:
+                best_d = dist_matrix[last][j]
+                best = j
         route.append(best)
         visited[best] = True
     return route
 
-def two_opt(points, route):
+def two_opt_matrix(dist_matrix, route):
     improved = True
     while improved:
         improved = False
-        for i in range(1, len(route) - 1):
-            for j in range(i + 1, len(route)):
+        n = len(route)
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
                 a, b = route[i - 1], route[i]
-                c, d = route[j], route[(j + 1) % len(route)]
-                before = haversine(points[a], points[b]) + haversine(points[c], points[d])
-                after  = haversine(points[a], points[c]) + haversine(points[b], points[d])
+                c, d = route[j], route[(j + 1) % n]
+                before = dist_matrix[a][b] + dist_matrix[c][d]
+                after  = dist_matrix[a][c] + dist_matrix[b][d]
                 if after < before - 1e-10:
                     route[i:j + 1] = route[i:j + 1][::-1]
                     improved = True
     return route
 
-def solve_tsp(coords):
-    if len(coords) <= 1:
-        return list(range(len(coords)))
-    route = nearest_neighbor(coords)
-    route = two_opt(coords, route)
+def solve_tsp_with_matrix(dist_matrix):
+    if len(dist_matrix) <= 1:
+        return list(range(len(dist_matrix)))
+    route = nearest_neighbor_matrix(dist_matrix)
+    route = two_opt_matrix(dist_matrix, route)
     return route
 
-def total_distance(coords, route):
-    d = sum(haversine(coords[route[i]], coords[route[i+1]]) for i in range(len(route)-1))
-    d += haversine(coords[route[-1]], coords[route[0]])
+def route_distance_from_matrix(dist_matrix, route):
+    d = sum(dist_matrix[route[i]][route[i+1]] for i in range(len(route)-1))
+    d += dist_matrix[route[-1]][route[0]]
     return round(d, 2)
-
-def google_maps_url(address):
-    return f"https://www.google.com/maps/search/?api=1&query={address.replace(' ', '+')}"
-
-def google_maps_directions(origin, destination):
-    o = origin.replace(' ', '+')
-    d = destination.replace(' ', '+')
-    return f"https://www.google.com/maps/dir/{o}/{d}"
 
 # ── Geocoding ──────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
@@ -116,7 +166,15 @@ def assign_to_volunteer(delivery_coord, volunteer_coords):
     dists = [haversine(delivery_coord, vc) for vc in volunteer_coords]
     return dists.index(min(dists))
 
-# ── Load saved data into session state ────────────────────────────────────────
+def google_maps_url(address):
+    return f"https://www.google.com/maps/search/?api=1&query={address.replace(' ', '+')}"
+
+def google_maps_directions(origin, destination):
+    o = origin.replace(' ', '+')
+    d = destination.replace(' ', '+')
+    return f"https://www.google.com/maps/dir/{o}/{d}"
+
+# ── Load saved data ────────────────────────────────────────────────────────────
 if "loaded" not in st.session_state:
     saved_vols = load_data("volunteers")
     saved_dels = load_data("deliveries")
@@ -126,7 +184,7 @@ if "loaded" not in st.session_state:
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
-st.caption("Enter volunteer and delivery addresses. The app clusters deliveries to the nearest volunteer and optimizes each route.")
+st.caption("Enter volunteer and delivery addresses. The app clusters deliveries to the nearest volunteer and optimizes each route using real driving roads.")
 
 tab_input, tab_map, tab_routes = st.tabs(["📋 Input", "🗺️ Map", "📍 Routes"])
 
@@ -214,7 +272,7 @@ with tab_input:
                 save_data("volunteers", st.session_state.volunteers)
                 save_data("deliveries", st.session_state.deliveries)
 
-                with st.spinner("Geocoding addresses... (this may take a moment)"):
+                with st.spinner("Geocoding addresses..."):
                     vol_results = []
                     for v in vols:
                         lat, lng = geocode_address(v["address"])
@@ -235,31 +293,46 @@ with tab_input:
                     st.error("No delivery addresses could be geocoded.")
                     st.stop()
 
+                # Cluster by straight-line proximity (fast)
                 vol_coords = [(v["lat"], v["lng"]) for v in vol_results]
                 clusters = {i: [] for i in range(len(vol_results))}
                 for d in del_results:
                     idx = assign_to_volunteer((d["lat"], d["lng"]), vol_coords)
                     clusters[idx].append(d)
 
-                routes = []
-                for vi, vol in enumerate(vol_results):
-                    stops = clusters[vi]
-                    if not stops:
-                        continue
-                    coords = [(s["lat"], s["lng"]) for s in stops]
-                    order = solve_tsp(coords)
-                    ordered = [stops[o] for o in order]
-                    dist = total_distance(
-                        [(vol["lat"], vol["lng"])] + coords,
-                        [0] + [o + 1 for o in order]
-                    )
-                    routes.append({
-                        "volunteer": vol,
-                        "stops": ordered,
-                        "distance_km": dist,
-                        "color": COLORS[vi % len(COLORS)],
-                        "hex": HEX_COLORS[vi % len(HEX_COLORS)],
-                    })
+                with st.spinner("Calculating real driving routes via OSRM..."):
+                    routes = []
+                    for vi, vol in enumerate(vol_results):
+                        stops = clusters[vi]
+                        if not stops:
+                            continue
+
+                        # Build distance matrix including volunteer home as point 0
+                        all_points = [(vol["lat"], vol["lng"])] + [(s["lat"], s["lng"]) for s in stops]
+                        dist_matrix = osrm_matrix(all_points)
+
+                        # TSP on indices 1..n (home is fixed start)
+                        n = len(stops)
+                        sub_matrix = [[dist_matrix[i+1][j+1] for j in range(n)] for i in range(n)]
+                        order = solve_tsp_with_matrix(sub_matrix)
+                        ordered_stops = [stops[o] for o in order]
+
+                        # Total driving distance: home → stops → home
+                        full_route_indices = [0] + [o + 1 for o in order]
+                        dist = route_distance_from_matrix(dist_matrix, full_route_indices)
+
+                        # Get actual road geometry for the map
+                        waypoints = [(vol["lat"], vol["lng"])] + [(s["lat"], s["lng"]) for s in ordered_stops] + [(vol["lat"], vol["lng"])]
+                        road_geometry = osrm_route_geometry(waypoints)
+
+                        routes.append({
+                            "volunteer": vol,
+                            "stops": ordered_stops,
+                            "distance_km": dist,
+                            "road_geometry": road_geometry,
+                            "color": COLORS[vi % len(COLORS)],
+                            "hex": HEX_COLORS[vi % len(HEX_COLORS)],
+                        })
 
                 st.session_state.routes = routes
                 st.success(f"✅ Optimized {len(del_results)} deliveries across {len(routes)} volunteers!")
@@ -281,6 +354,7 @@ with tab_map:
             color = r["color"]
             hex_c = r["hex"]
 
+            # Volunteer home marker
             folium.Marker(
                 location=[vol["lat"], vol["lng"]],
                 popup=folium.Popup(
@@ -292,16 +366,15 @@ with tab_map:
                 icon=folium.Icon(color=color, icon="home", prefix="fa"),
             ).add_to(m)
 
-            line_coords = (
-                [[vol["lat"], vol["lng"]]]
-                + [[s["lat"], s["lng"]] for s in r["stops"]]
-                + [[vol["lat"], vol["lng"]]]
-            )
-            folium.PolyLine(
-                line_coords, color=hex_c, weight=3, opacity=0.7, dash_array="6 4",
-                tooltip=f"{vol['name']}'s route ({r['distance_km']} km)"
-            ).add_to(m)
+            # Actual road polyline
+            if r.get("road_geometry"):
+                folium.PolyLine(
+                    r["road_geometry"],
+                    color=hex_c, weight=4, opacity=0.8,
+                    tooltip=f"{vol['name']}'s route ({r['distance_km']} km driving)"
+                ).add_to(m)
 
+            # Delivery stop markers
             for i, stop in enumerate(r["stops"]):
                 prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
                 folium.Marker(
@@ -321,10 +394,11 @@ with tab_map:
                     ),
                 ).add_to(m)
 
+        # Legend
         legend_html = "<div style='position:fixed;bottom:30px;left:30px;z-index:1000;background:white;padding:12px 16px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);font-family:sans-serif;font-size:13px'>"
         legend_html += "<b>Volunteers</b><br>"
         for r in routes:
-            legend_html += f"<span style='color:{r['hex']}'>●</span> {r['volunteer']['name']} &nbsp;({len(r['stops'])} stops, {r['distance_km']} km)<br>"
+            legend_html += f"<span style='color:{r['hex']}'>●</span> {r['volunteer']['name']} &nbsp;({len(r['stops'])} stops, {r['distance_km']} km driving)<br>"
         legend_html += "</div>"
         m.get_root().html.add_child(folium.Element(legend_html))
 
@@ -339,14 +413,14 @@ with tab_routes:
         summary = pd.DataFrame([{
             "Volunteer": r["volunteer"]["name"],
             "Deliveries": len(r["stops"]),
-            "Est. Distance (km)": r["distance_km"],
+            "Driving Distance (km)": r["distance_km"],
         } for r in routes])
         st.dataframe(summary, use_container_width=True, hide_index=True)
         st.divider()
 
         for r in routes:
             vol = r["volunteer"]
-            with st.expander(f"📍 {vol['name']} — {len(r['stops'])} stops ({r['distance_km']} km)", expanded=True):
+            with st.expander(f"📍 {vol['name']} — {len(r['stops'])} stops ({r['distance_km']} km driving)", expanded=True):
                 steps = []
                 steps.append({
                     "#": "🏠",
