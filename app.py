@@ -8,15 +8,15 @@ import math
 import requests
 import urllib.parse
 import uuid
+import io
 from datetime import datetime
 from supabase import create_client
 
-# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="C4C Route Optimizer", page_icon="🗺️", layout="wide")
 
-COLORS    = ["red","blue","green","orange","purple","darkred","cadetblue","darkgreen"]
-HEX_COLORS= ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#c0392b","#5f9ea0","#27ae60"]
-OSRM_BASE = "https://router.project-osrm.org"
+COLORS     = ["red","blue","green","orange","purple","darkred","cadetblue","darkgreen"]
+HEX_COLORS = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#c0392b","#5f9ea0","#27ae60"]
+OSRM_BASE  = "https://router.project-osrm.org"
 KM_TO_MILES = 0.621371
 
 # ── Supabase ───────────────────────────────────────────────────────────────────
@@ -73,7 +73,7 @@ def haversine(a, b):
 
 def km_to_miles(km): return round(km * KM_TO_MILES, 2)
 def gmaps_url(address): return f"https://www.google.com/maps/search/?api=1&query={address.replace(' ','+')}"
-def gmaps_dir(origin, dest): return f"https://www.google.com/maps/dir/{origin.replace(' ','+')}/{dest.replace(' ','+')}"
+def gmaps_dir(o, d): return f"https://www.google.com/maps/dir/{o.replace(' ','+')}/{d.replace(' ','+')}"
 def mailto_link(to, subject, body):
     return f"mailto:{to}?" + urllib.parse.urlencode({"subject": subject, "body": body})
 
@@ -85,167 +85,271 @@ def geocode_address(address: str):
     return (loc.latitude, loc.longitude) if loc else (None, None)
 
 # ── TSP ────────────────────────────────────────────────────────────────────────
-def nearest_neighbor(dist_matrix, start=0):
-    n = len(dist_matrix)
+def nearest_neighbor(dm, start=0):
+    n = len(dm)
     if n <= 1: return list(range(n))
     visited = [False]*n; route = [start]; visited[start] = True
     for _ in range(n-1):
-        last = route[-1]
-        best, best_d = -1, float("inf")
+        last = route[-1]; best, bd = -1, float("inf")
         for j in range(n):
-            if not visited[j] and dist_matrix[last][j] < best_d:
-                best_d = dist_matrix[last][j]; best = j
+            if not visited[j] and dm[last][j] < bd: bd = dm[last][j]; best = j
         route.append(best); visited[best] = True
     return route
 
-def two_opt(dist_matrix, route):
+def two_opt(dm, route):
     improved = True
     while improved:
         improved = False; n = len(route)
         for i in range(1, n-1):
             for j in range(i+1, n):
                 a,b = route[i-1],route[i]; c,d = route[j],route[(j+1)%n]
-                if dist_matrix[a][b]+dist_matrix[c][d] > dist_matrix[a][c]+dist_matrix[b][d]+1e-10:
+                if dm[a][b]+dm[c][d] > dm[a][c]+dm[b][d]+1e-10:
                     route[i:j+1] = route[i:j+1][::-1]; improved = True
     return route
 
-def route_cost(full_matrix, route, home_idx):
-    cost = full_matrix[home_idx][route[0]]
-    for i in range(len(route)-1): cost += full_matrix[route[i]][route[i+1]]
-    cost += full_matrix[route[-1]][home_idx]
-    return cost
+def route_cost(fm, route, hi):
+    cost = fm[hi][route[0]]
+    for i in range(len(route)-1): cost += fm[route[i]][route[i+1]]
+    return cost + fm[route[-1]][hi]
 
-def solve_tsp_from_home(full_matrix, home_idx, stop_indices):
-    if not stop_indices: return [], 0.0
-    n = len(stop_indices)
-    sub = [[full_matrix[stop_indices[i]][stop_indices[j]] for j in range(n)] for i in range(n)]
-    best_route, best_cost = None, float("inf")
-    for start in range(n):
-        route = two_opt(sub, nearest_neighbor(sub, start))
-        full_route = [stop_indices[r] for r in route]
-        cost = route_cost(full_matrix, full_route, home_idx)
-        if cost < best_cost: best_cost = cost; best_route = full_route
-    return best_route, round(best_cost, 2)
+def solve_tsp(fm, hi, stops):
+    if not stops: return [], 0.0
+    n = len(stops)
+    sub = [[fm[stops[i]][stops[j]] for j in range(n)] for i in range(n)]
+    best_r, best_c = None, float("inf")
+    for s in range(n):
+        r = two_opt(sub, nearest_neighbor(sub, s))
+        fr = [stops[x] for x in r]
+        c = route_cost(fm, fr, hi)
+        if c < best_c: best_c = c; best_r = fr
+    return best_r, round(best_c, 2)
 
 # ── Email ──────────────────────────────────────────────────────────────────────
-def generate_email_body(route):
+def generate_email(route):
     vol = route["volunteer"]; stops = route["stops"]; miles = km_to_miles(route["distance_km"])
     lines = [f"Hi {vol['name']},",
              f"\nThank you for volunteering to deliver yard signs for Conway for Congress!",
-             f"\nYou have {len(stops)} stop{'s' if len(stops)>1 else ''} assigned, covering approximately {miles} miles:\n"]
+             f"\nYou have {len(stops)} stop{'s' if len(stops)>1 else ''}, covering ~{miles} miles:\n"]
     for i, s in enumerate(stops):
-        prev = vol["address"] if i == 0 else stops[i-1]["address"]
+        prev = vol["address"] if i==0 else stops[i-1]["address"]
         note = f" -- Note: {s['note']}" if s.get("note") else ""
         lines += [f"  Stop {i+1}: {s['address']}{note}", f"  Directions: {gmaps_dir(prev, s['address'])}\n"]
     lines += [f"Return home: {vol['address']}", f"\nTotal: ~{miles} miles",
-              f"\nThank you!\nConway for Congress Team"]
+              "\nThank you!\nConway for Congress Team"]
     return "\n".join(lines)
+
+# ── CSV import helper ──────────────────────────────────────────────────────────
+FIELD_CANDIDATES = {
+    "address": ["address","street_address","mailing_address","primary_address",
+                "addr","street","address1","full_address","residential_address"],
+    "first_name": ["first_name","firstname","first","fname","given_name"],
+    "last_name":  ["last_name","lastname","last","lname","surname","family_name"],
+    "email":      ["email","email_address","e_mail","emailaddress"],
+    "phone":      ["phone","phone_number","mobile","cell","telephone","mobile_number","phone1"],
+    "city":       ["city","town","municipality"],
+    "state":      ["state","state_code","province"],
+    "zip":        ["zip","zipcode","zip_code","postal_code","postcode"],
+}
+
+def detect_column(df_cols, candidates):
+    cols_lower = {c.lower().strip().replace(" ","_"): c for c in df_cols}
+    for cand in candidates:
+        if cand in cols_lower: return cols_lower[cand]
+    return None
+
+def parse_csv(uploaded_file):
+    """Parse a CSV from NationBuilder, NGP VAN, or Action Network and return list of address dicts."""
+    df = pd.read_csv(uploaded_file, dtype=str).fillna("")
+    results = []
+    addr_col  = detect_column(df.columns, FIELD_CANDIDATES["address"])
+    fname_col = detect_column(df.columns, FIELD_CANDIDATES["first_name"])
+    lname_col = detect_column(df.columns, FIELD_CANDIDATES["last_name"])
+    email_col = detect_column(df.columns, FIELD_CANDIDATES["email"])
+    phone_col = detect_column(df.columns, FIELD_CANDIDATES["phone"])
+    city_col  = detect_column(df.columns, FIELD_CANDIDATES["city"])
+    state_col = detect_column(df.columns, FIELD_CANDIDATES["state"])
+    zip_col   = detect_column(df.columns, FIELD_CANDIDATES["zip"])
+
+    for _, row in df.iterrows():
+        addr = row[addr_col].strip() if addr_col else ""
+        if not addr: continue
+        # Build full address if city/state/zip are separate columns
+        if city_col or state_col or zip_col:
+            city  = row[city_col].strip()  if city_col  else ""
+            state = row[state_col].strip() if state_col else ""
+            zp    = row[zip_col].strip()   if zip_col   else ""
+            parts = [p for p in [city, state, zp] if p]
+            if parts: addr = addr + ", " + ", ".join(parts)
+        fname = row[fname_col].strip() if fname_col else ""
+        lname = row[lname_col].strip() if lname_col else ""
+        contact = (fname + " " + lname).strip()
+        results.append({
+            "id":      str(uuid.uuid4()),
+            "address": addr,
+            "contact": contact,
+            "phone":   row[phone_col].strip() if phone_col else "",
+            "note":    "",
+            "status":  "pending",
+        })
+    return results
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 if "loaded" not in st.session_state:
-    st.session_state.volunteer_roster  = load_data("volunteer_roster") or []
-    st.session_state.master_addresses  = load_data("master_addresses") or []
-    st.session_state.run_address_ids   = load_data("run_address_ids") or []
-    st.session_state.completed         = {c["key"]: c for c in (load_data("completed") or [])}
-    st.session_state.route_history     = load_data("route_history") or []  # list of saved route runs
-    st.session_state.routes            = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
-    st.session_state.availability      = set()
+    st.session_state.volunteer_roster = load_data("volunteer_roster") or []
+    st.session_state.master_addresses = load_data("master_addresses") or []
+    st.session_state.run_address_ids  = load_data("run_address_ids")  or []
+    st.session_state.completed        = {c["key"]: c for c in (load_data("completed") or [])}
+    st.session_state.route_history    = load_data("route_history")    or []
+    st.session_state.routes           = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
+    st.session_state.availability     = set()
+    st.session_state.new_vol          = {"name":"","email":"","address":""}
     st.session_state.loaded = True
 
 def get_master_by_id(aid):
     return next((a for a in st.session_state.master_addresses if a["id"] == aid), None)
 
-def upsert_master(addr_dict):
-    """Add or update an address in the master list by id."""
-    existing = next((i for i,a in enumerate(st.session_state.master_addresses) if a["id"] == addr_dict["id"]), None)
-    if existing is not None:
-        st.session_state.master_addresses[existing] = addr_dict
-    else:
-        st.session_state.master_addresses.append(addr_dict)
-    save_data("master_addresses", st.session_state.master_addresses)
-
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
-st.caption("Manage volunteers, plan delivery runs, and track every sign on the map.")
 
 tab_roster, tab_addresses, tab_run, tab_map, tab_routes, tab_emails = st.tabs([
     "👥 Volunteers", "📋 All Addresses", "🚐 Delivery Run", "🗺️ Map", "📍 Routes", "📧 Emails"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — VOLUNTEER ROSTER
+# TAB 1 — VOLUNTEERS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_roster:
     st.subheader("👥 Volunteer Roster")
-    st.caption("Add all volunteers here once. Mark who is available on the Delivery Run tab.")
+
+    # ── Add new volunteer form ──
+    with st.container(border=True):
+        st.markdown("**Add New Volunteer**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            new_name = st.text_input("Name", key="new_vol_name", placeholder="Full name")
+        with c2:
+            new_email = st.text_input("Email", key="new_vol_email", placeholder="email@example.com")
+        with c3:
+            new_addr = st.text_input("Home address", key="new_vol_addr", placeholder="123 Main St, Baltimore, MD")
+        if st.button("➕ Add to Roster", type="primary"):
+            if new_name and new_addr:
+                st.session_state.volunteer_roster.append({
+                    "name": new_name, "email": new_email, "address": new_addr
+                })
+                save_data("volunteer_roster", st.session_state.volunteer_roster)
+                st.toast(f"✅ {new_name} added to roster!", icon="👤")
+                st.rerun()
+            else:
+                st.warning("Name and address are required.")
+
+    st.divider()
+
+    # ── Roster table in expander ──
     roster = st.session_state.volunteer_roster
-    for i, v in enumerate(roster):
-        with st.container(border=True):
-            col0, col1, col2, col3, col4 = st.columns([0.3, 2, 2, 3, 1])
-            with col0:
-                st.markdown(f'<span style="color:{HEX_COLORS[i%len(HEX_COLORS)]};font-size:22px;">&#9679;</span>', unsafe_allow_html=True)
-            with col1:
-                roster[i]["name"] = st.text_input("Name", value=v.get("name",""), key=f"rname_{i}", placeholder="Full name")
-            with col2:
-                roster[i]["email"] = st.text_input("Email", value=v.get("email",""), key=f"remail_{i}", placeholder="email@example.com")
-            with col3:
-                roster[i]["address"] = st.text_input("Home address", value=v.get("address",""), key=f"raddr_{i}", placeholder="123 Main St, Baltimore, MD")
-            with col4:
-                st.write(""); st.write("")
-                if st.button("Remove", key=f"rrem_{i}"):
-                    st.session_state.volunteer_roster.pop(i)
-                    save_data("volunteer_roster", st.session_state.volunteer_roster)
-                    st.rerun()
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("+ Add Volunteer", use_container_width=True):
-            st.session_state.volunteer_roster.append({"name":"","email":"","address":""})
-            st.rerun()
-    with c2:
-        if st.button("💾 Save Roster", type="primary", use_container_width=True):
-            save_data("volunteer_roster", st.session_state.volunteer_roster)
-            st.success("Roster saved!")
+    if not roster:
+        st.info("No volunteers yet. Add one above.")
+    else:
+        with st.expander(f"📋 View All Volunteers ({len(roster)})", expanded=True):
+            # Editable dataframe
+            df = pd.DataFrame([{
+                "Name": v.get("name",""),
+                "Email": v.get("email",""),
+                "Address": v.get("address",""),
+            } for v in roster])
+            edited = st.data_editor(
+                df,
+                use_container_width=True,
+                hide_index=False,
+                num_rows="fixed",
+                key="roster_editor"
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("💾 Save Changes", use_container_width=True):
+                    updated = []
+                    for i, row in edited.iterrows():
+                        updated.append({"name": row["Name"], "email": row["Email"], "address": row["Address"]})
+                    st.session_state.volunteer_roster = updated
+                    save_data("volunteer_roster", updated)
+                    st.toast("Roster saved!", icon="💾")
+            with c2:
+                del_idx = st.selectbox("Remove volunteer", options=["—"] + [v["name"] for v in roster], key="del_vol")
+                if st.button("🗑️ Remove", use_container_width=True):
+                    if del_idx != "—":
+                        st.session_state.volunteer_roster = [v for v in roster if v["name"] != del_idx]
+                        save_data("volunteer_roster", st.session_state.volunteer_roster)
+                        st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — ALL ADDRESSES (master list)
+# TAB 2 — ALL ADDRESSES
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_addresses:
     st.subheader("📋 All Addresses")
-    st.caption("Master list of every address. Automatically updated when you complete stops on the Routes tab.")
+    st.caption("Master list of every address. Updated automatically when stops are completed.")
 
     master = st.session_state.master_addresses
     delivered = [a for a in master if a.get("status") == "delivered"]
     pending   = [a for a in master if a.get("status") != "delivered"]
 
-    # ── Add new address manually ──
-    with st.expander("➕ Add new address manually", expanded=False):
-        na_col1, na_col2, na_col3 = st.columns(3)
-        with na_col1:
-            new_addr = st.text_input("Address", key="new_addr_input", placeholder="123 Oak St, Baltimore, MD")
-        with na_col2:
-            new_contact = st.text_input("Contact name (optional)", key="new_contact_input")
-        with na_col3:
-            new_phone = st.text_input("Phone (optional)", key="new_phone_input")
-        new_note = st.text_input("Note (optional)", key="new_note_input", placeholder="e.g. leave at side door")
-        if st.button("Add Address", type="primary"):
-            if new_addr:
-                new_entry = {
-                    "id": str(uuid.uuid4()),
-                    "address": new_addr,
-                    "contact": new_contact,
-                    "phone": new_phone,
-                    "note": new_note,
-                    "status": "pending"
-                }
-                st.session_state.master_addresses.append(new_entry)
+    # ── CSV Import ──
+    with st.expander("📂 Import from Campaign Database (NationBuilder, NGP VAN, Action Network)", expanded=False):
+        st.caption("Upload a CSV export from your campaign database. The system will auto-detect address, name, phone, and email columns.")
+        uploaded = st.file_uploader("Upload CSV", type=["csv"], key="csv_upload")
+        if uploaded:
+            try:
+                parsed = parse_csv(uploaded)
+                st.success(f"Found {len(parsed)} addresses in CSV.")
+                preview_df = pd.DataFrame([{"Address": p["address"], "Contact": p["contact"], "Phone": p["phone"]} for p in parsed])
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("✅ Import All to Master List", type="primary"):
+                        existing_addrs = {a["address"].lower() for a in st.session_state.master_addresses}
+                        added = 0
+                        for p in parsed:
+                            if p["address"].lower() not in existing_addrs:
+                                st.session_state.master_addresses.append(p)
+                                added += 1
+                        save_data("master_addresses", st.session_state.master_addresses)
+                        st.toast(f"✅ Imported {added} new addresses!", icon="📂")
+                        st.rerun()
+                with c2:
+                    if st.button("➕ Also Add to Current Delivery Run"):
+                        existing_addrs = {a["address"].lower() for a in st.session_state.master_addresses}
+                        for p in parsed:
+                            if p["address"].lower() not in existing_addrs:
+                                st.session_state.master_addresses.append(p)
+                            entry = next((a for a in st.session_state.master_addresses if a["address"].lower() == p["address"].lower()), None)
+                            if entry and entry["id"] not in st.session_state.run_address_ids:
+                                st.session_state.run_address_ids.append(entry["id"])
+                        save_data("master_addresses", st.session_state.master_addresses)
+                        save_data("run_address_ids", st.session_state.run_address_ids)
+                        st.toast("Added to master list and current run!", icon="🚐")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Could not parse CSV: {e}")
+
+    # ── Add manually ──
+    with st.expander("➕ Add address manually", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1: na = st.text_input("Address*", key="na_addr", placeholder="123 Oak St, Baltimore, MD")
+        with c2: nc = st.text_input("Contact name", key="na_contact")
+        with c3: np = st.text_input("Phone", key="na_phone")
+        nn = st.text_input("Note", key="na_note", placeholder="e.g. leave at side door")
+        if st.button("Add Address", type="primary", key="na_add"):
+            if na:
+                st.session_state.master_addresses.append({
+                    "id": str(uuid.uuid4()), "address": na, "contact": nc,
+                    "phone": np, "note": nn, "status": "pending"
+                })
                 save_data("master_addresses", st.session_state.master_addresses)
-                st.success(f"Added: {new_addr}")
+                st.toast(f"Added: {na}", icon="📍")
                 st.rerun()
 
     st.divider()
 
-    # ── Pending list ──
-    st.markdown(f"### ⏳ Pending ({len(pending)})")
+    # ── Pending ──
+    st.markdown(f"### ⏳ Pending — {len(pending)} address{'es' if len(pending)!=1 else ''}")
     if not pending:
         st.info("No pending addresses.")
     else:
@@ -254,46 +358,45 @@ with tab_addresses:
                 c1, c2, c3 = st.columns([5, 2, 1])
                 with c1:
                     st.markdown(f"**{a['address']}**")
-                    details = []
-                    if a.get("contact"): details.append(f"👤 {a['contact']}")
-                    if a.get("phone"):   details.append(f"📞 {a['phone']}")
-                    if a.get("note"):    details.append(f"📝 {a['note']}")
-                    if details: st.caption(" · ".join(details))
+                    det = []
+                    if a.get("contact"): det.append(f"👤 {a['contact']}")
+                    if a.get("phone"):   det.append(f"📞 {a['phone']}")
+                    if a.get("note"):    det.append(f"📝 {a['note']}")
+                    if det: st.caption(" · ".join(det))
                 with c2:
-                    if st.button("Mark Delivered", key=f"mdeliv_{a['id']}"):
-                        idx = next(i for i,x in enumerate(st.session_state.master_addresses) if x["id"] == a["id"])
+                    if st.button("Mark Delivered", key=f"md_{a['id']}"):
+                        idx = next(i for i,x in enumerate(st.session_state.master_addresses) if x["id"]==a["id"])
                         st.session_state.master_addresses[idx]["status"] = "delivered"
                         st.session_state.master_addresses[idx]["delivered_date"] = datetime.now().strftime("%b %d, %Y")
                         save_data("master_addresses", st.session_state.master_addresses)
                         st.rerun()
                 with c3:
                     if st.button("✕", key=f"mdel_{a['id']}"):
-                        st.session_state.master_addresses = [x for x in st.session_state.master_addresses if x["id"] != a["id"]]
+                        st.session_state.master_addresses = [x for x in st.session_state.master_addresses if x["id"]!=a["id"]]
                         save_data("master_addresses", st.session_state.master_addresses)
                         st.rerun()
 
     st.divider()
 
-    # ── Delivered list ──
-    st.markdown(f"### ✅ Signs Placed ({len(delivered)})")
+    # ── Delivered ──
+    st.markdown(f"### ✅ Signs Placed — {len(delivered)} address{'es' if len(delivered)!=1 else ''}")
     if not delivered:
         st.info("No signs placed yet.")
     else:
         for a in delivered:
             with st.container(border=True):
-                c1, c2 = st.columns([7, 1])
+                c1, c2 = st.columns([8, 1])
                 with c1:
-                    delivered_date = a.get("delivered_date", "")
-                    date_text = f" · 📅 {delivered_date}" if delivered_date else ""
+                    date_text = f" · 📅 {a['delivered_date']}" if a.get("delivered_date") else ""
                     st.markdown(f"✅ **{a['address']}**{date_text}")
-                    details = []
-                    if a.get("contact"): details.append(f"👤 {a['contact']}")
-                    if a.get("phone"):   details.append(f"📞 {a['phone']}")
-                    if a.get("note"):    details.append(f"📝 {a['note']}")
-                    if details: st.caption(" · ".join(details))
+                    det = []
+                    if a.get("contact"): det.append(f"👤 {a['contact']}")
+                    if a.get("phone"):   det.append(f"📞 {a['phone']}")
+                    if a.get("note"):    det.append(f"📝 {a['note']}")
+                    if det: st.caption(" · ".join(det))
                 with c2:
-                    if st.button("Undo", key=f"mundo_{a['id']}"):
-                        idx = next(i for i,x in enumerate(st.session_state.master_addresses) if x["id"] == a["id"])
+                    if st.button("Undo", key=f"mu_{a['id']}"):
+                        idx = next(i for i,x in enumerate(st.session_state.master_addresses) if x["id"]==a["id"])
                         st.session_state.master_addresses[idx]["status"] = "pending"
                         save_data("master_addresses", st.session_state.master_addresses)
                         st.rerun()
@@ -303,7 +406,6 @@ with tab_addresses:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_run:
     st.subheader("🚐 Delivery Run Setup")
-
     col1, col2 = st.columns(2)
 
     with col1:
@@ -314,112 +416,93 @@ with tab_run:
         else:
             for i, v in enumerate(roster):
                 if not v.get("name"): continue
-                is_avail = v["name"] in st.session_state.availability
-                checked = st.checkbox(
-                    f"**{v['name']}** — {v.get('address','no address')}",
-                    value=is_avail, key=f"avail_{i}"
-                )
+                checked = st.checkbox(f"**{v['name']}** — {v.get('address','no address')}",
+                                      value=v["name"] in st.session_state.availability, key=f"avail_{i}")
                 if checked: st.session_state.availability.add(v["name"])
                 else: st.session_state.availability.discard(v["name"])
 
     with col2:
         st.markdown("**Delivery Addresses for this Run**")
 
-        # ── Search existing master addresses ──
-        st.caption("Search existing addresses or add new ones.")
-        search_q = st.text_input("🔍 Search master addresses", placeholder="Type street name...", key="run_search")
-
+        # Search master list
+        search_q = st.text_input("🔍 Search saved addresses", placeholder="Type street name...", key="run_search")
         if search_q:
             matches = [a for a in st.session_state.master_addresses
                        if search_q.lower() in a["address"].lower()
                        and a["id"] not in st.session_state.run_address_ids]
-            if matches:
-                for m in matches[:8]:
-                    c1, c2 = st.columns([7, 1])
-                    with c1:
-                        status_icon = "✅" if m.get("status") == "delivered" else "⏳"
-                        st.markdown(f"{status_icon} {m['address']}")
-                    with c2:
-                        if st.button("Add", key=f"srch_add_{m['id']}"):
-                            st.session_state.run_address_ids.append(m["id"])
-                            save_data("run_address_ids", st.session_state.run_address_ids)
-                            st.rerun()
-            else:
-                st.caption("No matches found.")
-
-        # ── Add brand new address ──
-        with st.expander("➕ Add new address to this run", expanded=False):
-            nr_col1, nr_col2 = st.columns(2)
-            with nr_col1:
-                nr_addr = st.text_input("Address", key="nr_addr", placeholder="123 Oak St, Baltimore, MD")
-            with nr_col2:
-                nr_contact = st.text_input("Contact (optional)", key="nr_contact")
-            nr_phone = st.text_input("Phone (optional)", key="nr_phone")
-            nr_note  = st.text_input("Note (optional)", key="nr_note", placeholder="e.g. leave at side door")
-            if st.button("Add to Run + Master List", type="primary", key="nr_add"):
-                if nr_addr:
-                    new_entry = {
-                        "id": str(uuid.uuid4()),
-                        "address": nr_addr,
-                        "contact": nr_contact,
-                        "phone": nr_phone,
-                        "note": nr_note,
-                        "status": "pending"
-                    }
-                    st.session_state.master_addresses.append(new_entry)
-                    save_data("master_addresses", st.session_state.master_addresses)
-                    st.session_state.run_address_ids.append(new_entry["id"])
-                    save_data("run_address_ids", st.session_state.run_address_ids)
-                    st.success(f"Added: {nr_addr}")
-                    st.rerun()
-
-        # ── Current run addresses ──
-        st.divider()
-        run_addresses = [get_master_by_id(aid) for aid in st.session_state.run_address_ids]
-        run_addresses = [a for a in run_addresses if a]
-        st.markdown(f"**Current run: {len(run_addresses)} address{'es' if len(run_addresses)!=1 else ''}**")
-
-        if not run_addresses:
-            st.info("No addresses in this run yet. Search above or add a new one.")
-        else:
-            # Bulk import
-            bulk = st.text_area("Or bulk import (one per line):", height=80, key="run_bulk",
-                                placeholder="456 Elm Ave, Baltimore, MD\n789 Oak St, Baltimore, MD")
-            if st.button("Import", key="run_bulk_import"):
-                lines = [l.strip() for l in bulk.splitlines() if l.strip()]
-                for l in lines:
-                    new_entry = {"id": str(uuid.uuid4()), "address": l, "contact": "", "phone": "", "note": "", "status": "pending"}
-                    st.session_state.master_addresses.append(new_entry)
-                    st.session_state.run_address_ids.append(new_entry["id"])
-                save_data("master_addresses", st.session_state.master_addresses)
-                save_data("run_address_ids", st.session_state.run_address_ids)
-                st.rerun()
-
-            for a in run_addresses:
-                c1, c2 = st.columns([8, 1])
+            for m in matches[:6]:
+                c1, c2 = st.columns([7,1])
                 with c1:
-                    status_icon = "✅" if a.get("status") == "delivered" else "⏳"
-                    st.markdown(f"{status_icon} {a['address']}")
+                    icon = "✅" if m.get("status")=="delivered" else "⏳"
+                    contact = f" · {m['contact']}" if m.get("contact") else ""
+                    st.markdown(f"{icon} {m['address']}{contact}")
                 with c2:
-                    if st.button("✕", key=f"run_rem_{a['id']}"):
-                        st.session_state.run_address_ids.remove(a["id"])
+                    if st.button("Add", key=f"sa_{m['id']}"):
+                        st.session_state.run_address_ids.append(m["id"])
                         save_data("run_address_ids", st.session_state.run_address_ids)
                         st.rerun()
+            if not matches:
+                st.caption("No matches found in saved addresses.")
+
+        # Add new address
+        with st.expander("➕ Add new address", expanded=False):
+            c1, c2 = st.columns(2)
+            with c1: nr_a = st.text_input("Address*", key="nr_addr", placeholder="123 Oak St, Baltimore, MD")
+            with c2: nr_c = st.text_input("Contact", key="nr_contact")
+            nr_p = st.text_input("Phone", key="nr_phone")
+            nr_n = st.text_input("Note", key="nr_note", placeholder="e.g. leave at side door")
+            if st.button("Add to Run + Master List", type="primary", key="nr_add"):
+                if nr_a:
+                    e = {"id":str(uuid.uuid4()),"address":nr_a,"contact":nr_c,"phone":nr_p,"note":nr_n,"status":"pending"}
+                    st.session_state.master_addresses.append(e)
+                    save_data("master_addresses", st.session_state.master_addresses)
+                    st.session_state.run_address_ids.append(e["id"])
+                    save_data("run_address_ids", st.session_state.run_address_ids)
+                    st.toast(f"Added: {nr_a}", icon="📍")
+                    st.rerun()
+
+        # Bulk import
+        with st.expander("📋 Bulk import addresses", expanded=False):
+            bulk = st.text_area("One address per line:", height=80, key="run_bulk",
+                                placeholder="456 Elm Ave, Baltimore, MD\n789 Oak St, Baltimore, MD")
+            if st.button("Import", key="run_bulk_btn"):
+                lines = [l.strip() for l in bulk.splitlines() if l.strip()]
+                for l in lines:
+                    e = {"id":str(uuid.uuid4()),"address":l,"contact":"","phone":"","note":"","status":"pending"}
+                    st.session_state.master_addresses.append(e)
+                    st.session_state.run_address_ids.append(e["id"])
+                save_data("master_addresses", st.session_state.master_addresses)
+                save_data("run_address_ids", st.session_state.run_address_ids)
+                st.toast(f"Imported {len(lines)} addresses", icon="📋")
+                st.rerun()
+
+        # Current run list
+        st.divider()
+        run_addrs = [get_master_by_id(aid) for aid in st.session_state.run_address_ids]
+        run_addrs = [a for a in run_addrs if a]
+        st.markdown(f"**Current run: {len(run_addrs)} stop{'s' if len(run_addrs)!=1 else ''}**")
+        for a in run_addrs:
+            c1, c2 = st.columns([8,1])
+            with c1:
+                icon = "✅" if a.get("status")=="delivered" else "⏳"
+                st.markdown(f"{icon} {a['address']}")
+            with c2:
+                if st.button("✕", key=f"rr_{a['id']}"):
+                    st.session_state.run_address_ids.remove(a["id"])
+                    save_data("run_address_ids", st.session_state.run_address_ids)
+                    st.rerun()
 
     st.divider()
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("💾 Save Run", use_container_width=True):
             save_data("run_address_ids", st.session_state.run_address_ids)
-            st.success("Saved!")
+            st.toast("Run saved!", icon="💾")
     with c2:
         if st.button("🗑️ Clear Run", use_container_width=True):
             st.session_state.run_address_ids = []
-            st.session_state.completed = {}
-            st.session_state.routes = []
             st.session_state.availability = set()
             save_data("run_address_ids", [])
-            save_data("completed", [])
             st.rerun()
     with c3:
         if st.button("🚀 Optimize Routes", type="primary", use_container_width=True):
@@ -428,164 +511,164 @@ with tab_run:
             run_addrs = [get_master_by_id(aid) for aid in st.session_state.run_address_ids]
             run_addrs = [a for a in run_addrs if a and a.get("address")]
 
-            if not active_vols:
-                st.error("Please check at least one available volunteer.")
-            elif not run_addrs:
-                st.error("Please add at least one delivery address.")
-            else:
-                with st.spinner("Geocoding addresses..."):
-                    vol_results = []
-                    for v in active_vols:
-                        lat, lng = geocode_address(v["address"])
-                        if lat is None: st.error(f"Could not geocode: {v['address']}"); st.stop()
-                        vol_results.append({**v, "lat": lat, "lng": lng})
+            if not active_vols: st.error("Check at least one available volunteer."); st.stop()
+            if not run_addrs:   st.error("Add at least one delivery address."); st.stop()
 
-                    del_results = []
-                    for a in run_addrs:
-                        lat, lng = geocode_address(a["address"])
-                        if lat is None: st.warning(f"Skipping: {a['address']}"); continue
-                        del_results.append({**a, "lat": lat, "lng": lng})
+            with st.spinner("Geocoding..."):
+                vol_results = []
+                for v in active_vols:
+                    lat, lng = geocode_address(v["address"])
+                    if lat is None: st.error(f"Could not geocode: {v['address']}"); st.stop()
+                    vol_results.append({**v, "lat": lat, "lng": lng})
+                del_results = []
+                for a in run_addrs:
+                    lat, lng = geocode_address(a["address"])
+                    if lat is None: st.warning(f"Skipping: {a['address']}"); continue
+                    del_results.append({**a, "lat": lat, "lng": lng})
 
-                if not del_results: st.error("No addresses could be geocoded."); st.stop()
+            if not del_results: st.error("No addresses could be geocoded."); st.stop()
 
-                with st.spinner("Building driving distance matrix..."):
-                    all_points = [(v["lat"],v["lng"]) for v in vol_results] + [(d["lat"],d["lng"]) for d in del_results]
-                    n_vols = len(vol_results)
-                    full_matrix = osrm_matrix(all_points)
+            with st.spinner("Building distance matrix..."):
+                all_pts = [(v["lat"],v["lng"]) for v in vol_results] + [(d["lat"],d["lng"]) for d in del_results]
+                n_vols = len(vol_results)
+                fm = osrm_matrix(all_pts)
 
-                with st.spinner("Optimizing routes..."):
-                    clusters = {i: [] for i in range(n_vols)}
-                    for di in range(len(del_results)):
-                        best_vol = min(range(n_vols), key=lambda vi: full_matrix[vi][n_vols+di])
-                        clusters[best_vol].append(n_vols+di)
+            with st.spinner("Optimizing routes..."):
+                clusters = {i: [] for i in range(n_vols)}
+                for di in range(len(del_results)):
+                    bv = min(range(n_vols), key=lambda vi: fm[vi][n_vols+di])
+                    clusters[bv].append(n_vols+di)
+                routes = []
+                for vi, vol in enumerate(vol_results):
+                    if not clusters[vi]: continue
+                    oi, dk = solve_tsp(fm, vi, clusters[vi])
+                    os_ = [del_results[idx-n_vols] for idx in oi]
+                    wps = [(vol["lat"],vol["lng"])] + [(s["lat"],s["lng"]) for s in os_] + [(vol["lat"],vol["lng"])]
+                    routes.append({
+                        "volunteer": vol, "stops": os_,
+                        "distance_km": dk, "distance_miles": km_to_miles(dk),
+                        "road_geometry": osrm_route_geometry(wps),
+                        "color": COLORS[vi%len(COLORS)], "hex": HEX_COLORS[vi%len(HEX_COLORS)],
+                    })
 
-                    routes = []
-                    for vi, vol in enumerate(vol_results):
-                        if not clusters[vi]: continue
-                        ordered_indices, dist_km = solve_tsp_from_home(full_matrix, vi, clusters[vi])
-                        ordered_stops = [del_results[idx-n_vols] for idx in ordered_indices]
-                        waypoints = [(vol["lat"],vol["lng"])] + [(s["lat"],s["lng"]) for s in ordered_stops] + [(vol["lat"],vol["lng"])]
-                        routes.append({
-                            "volunteer": vol,
-                            "stops": ordered_stops,
-                            "distance_km": dist_km,
-                            "distance_miles": km_to_miles(dist_km),
-                            "road_geometry": osrm_route_geometry(waypoints),
-                            "color": COLORS[vi%len(COLORS)],
-                            "hex": HEX_COLORS[vi%len(HEX_COLORS)],
-                        })
-
-                st.session_state.routes = routes
-                # Save to route history with timestamp — most recent first
-                run_record = {
-                    "timestamp": datetime.now().strftime("%b %d, %Y at %I:%M %p"),
-                    "routes": routes
-                }
-                st.session_state.route_history = [run_record] + (st.session_state.route_history or [])
-                save_data("route_history", st.session_state.route_history)
-                st.toast(f"✅ Routes ready — {len(del_results)} deliveries across {len(routes)} volunteers", icon="🗺️")
+            st.session_state.routes = routes
+            run_record = {"timestamp": datetime.now().strftime("%b %d, %Y at %I:%M %p"), "routes": routes}
+            st.session_state.route_history = [run_record] + (st.session_state.route_history or [])
+            save_data("route_history", st.session_state.route_history)
+            st.toast(f"Routes ready — {len(del_results)} stops across {len(routes)} volunteers", icon="🗺️")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — MAP
+# TAB 4 — MAP (always visible, shows all known pins)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_map:
-    if "routes" not in st.session_state or not st.session_state.routes:
-        st.info("Run the optimizer first on the Delivery Run tab.")
-    else:
-        routes = st.session_state.routes
-        completed = st.session_state.completed
+    master = st.session_state.master_addresses
+    completed = st.session_state.completed
+    routes = st.session_state.get("routes", [])
 
-        all_lats = [r["volunteer"]["lat"] for r in routes] + [s["lat"] for r in routes for s in r["stops"]]
-        all_lngs = [r["volunteer"]["lng"] for r in routes] + [s["lng"] for r in routes for s in r["stops"]]
-        center = (sum(all_lats)/len(all_lats), sum(all_lngs)/len(all_lngs))
+    # Default center: Baltimore
+    center = [39.2904, -76.6122]
+    all_geocoded = [(a["lat"], a["lng"]) for a in master if a.get("lat") and a.get("lng")]
 
-        m = folium.Map(location=center, zoom_start=12, tiles="CartoDB positron")
+    m = folium.Map(location=center, zoom_start=11, tiles="CartoDB positron")
 
-        for r in routes:
-            vol = r["volunteer"]
-            hex_c = r["hex"]; color = r["color"]
+    # Draw route lines if routes exist
+    for r in routes:
+        vol = r["volunteer"]
+        hex_c = r["hex"]; color = r["color"]
+        folium.Marker(
+            location=[vol["lat"], vol["lng"]],
+            popup=folium.Popup(f"<b>Home: {vol['name']}</b><br>{vol['address']}", max_width=220),
+            tooltip=f"Home: {vol['name']}",
+            icon=folium.Icon(color=color, icon="home", prefix="fa"),
+        ).add_to(m)
+        if r.get("road_geometry"):
+            folium.PolyLine(r["road_geometry"], color=hex_c, weight=4, opacity=0.7,
+                            tooltip=f"{vol['name']}: {r['distance_miles']} mi").add_to(m)
 
+    # Draw all master address pins
+    for a in master:
+        # Try to geocode if no lat/lng stored yet
+        lat = a.get("lat"); lng = a.get("lng")
+        if not lat or not lng:
+            continue  # Only show geocoded pins
+        is_done = a.get("status") == "delivered"
+        note_html = f"<br><i>📝 {a['note']}</i>" if a.get("note") else ""
+        contact_html = f"<br>👤 {a['contact']}" if a.get("contact") else ""
+        date_html = f"<br>📅 {a['delivered_date']}" if a.get("delivered_date") else ""
+        if is_done:
             folium.Marker(
-                location=[vol["lat"], vol["lng"]],
-                popup=folium.Popup(f"<b>Home: {vol['name']}</b><br>{vol['address']}", max_width=250),
-                tooltip=f"Home: {vol['name']}",
-                icon=folium.Icon(color=color, icon="home", prefix="fa"),
+                location=[lat, lng],
+                popup=folium.Popup(f"<b>✅ Sign Placed</b><br>{a['address']}{contact_html}{note_html}{date_html}", max_width=230),
+                tooltip=f"Sign placed — {a['address']}",
+                icon=folium.Icon(color="green", icon="check", prefix="fa"),
+            ).add_to(m)
+        else:
+            folium.CircleMarker(
+                location=[lat, lng],
+                radius=7, color="#aaa", fill=True, fill_color="#ccc", fill_opacity=0.8,
+                popup=folium.Popup(f"<b>⏳ Pending</b><br>{a['address']}{contact_html}{note_html}", max_width=230),
+                tooltip=f"Pending — {a['address']}",
             ).add_to(m)
 
-            if r.get("road_geometry"):
-                folium.PolyLine(r["road_geometry"], color=hex_c, weight=4, opacity=0.8,
-                                tooltip=f"{vol['name']}: {r['distance_miles']} mi").add_to(m)
+    # Legend
+    ca, cb, _ = st.columns([1,1,6])
+    ca.markdown('<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign placed', unsafe_allow_html=True)
+    cb.markdown('<span style="color:#aaa;font-size:20px;">&#9679;</span> Pending', unsafe_allow_html=True)
+    st_folium(m, use_container_width=True, height=580)
 
-            for i, stop in enumerate(r["stops"]):
-                prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
-                key = vol["name"] + "_" + str(i)
-                is_done = key in completed
-                note_html = f"<br><i>Note: {stop['note']}</i>" if stop.get("note") else ""
-                contact_html = f"<br>👤 {stop['contact']}" if stop.get("contact") else ""
-
-                if is_done:
-                    folium.Marker(
-                        location=[stop["lat"], stop["lng"]],
-                        popup=folium.Popup(f"<b>Sign Placed</b><br>{stop['address']}{contact_html}{note_html}", max_width=250),
-                        tooltip=f"Sign placed — {stop['address']}",
-                        icon=folium.Icon(color="green", icon="check", prefix="fa"),
-                    ).add_to(m)
-                else:
-                    folium.Marker(
-                        location=[stop["lat"], stop["lng"]],
-                        popup=folium.Popup(
-                            f"<b>Stop {i+1} — {vol['name']}</b><br>{stop['address']}{contact_html}{note_html}<br>"
-                            f"<a href='{gmaps_dir(prev, stop['address'])}' target='_blank'>Get Directions</a>",
-                            max_width=250),
-                        tooltip=f"Stop {i+1} — {vol['name']}",
-                        icon=folium.DivIcon(
-                            html=f'<div style="background:white;color:{hex_c};border:2px solid {hex_c};border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:12px;box-shadow:0 2px 4px rgba(0,0,0,0.25)">{i+1}</div>',
-                            icon_size=(26,26), icon_anchor=(13,13)),
-                    ).add_to(m)
-
-        # Legend
-        c_a, c_b, c_rest = st.columns([1,1,6])
-        c_a.markdown('<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign placed', unsafe_allow_html=True)
-        c_b.markdown('<span style="color:#aaa;font-size:20px;">&#9679;</span> Pending', unsafe_allow_html=True)
-        st_folium(m, use_container_width=True, height=580)
+    if not master:
+        st.info("No addresses yet. Add some in the All Addresses or Delivery Run tab.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — ROUTES
+# TAB 5 — ROUTES (full history, delete button per run)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_routes:
-    if not st.session_state.get("route_history"):
-        st.info("Run the optimizer first on the Delivery Run tab.")
+    if not st.session_state.route_history:
+        st.info("No routes yet. Run the optimizer on the Delivery Run tab.")
     else:
         completed = st.session_state.completed
-
         for run_idx, run_record in enumerate(st.session_state.route_history):
-            timestamp = run_record.get("timestamp", "Unknown date")
+            timestamp = run_record.get("timestamp","Unknown date")
             routes = run_record["routes"]
 
-            st.markdown(f"## 📅 Run: {timestamp}")
-            if run_idx == 0:
-                st.caption("Most recent run")
+            # Header row with delete button
+            hc1, hc2 = st.columns([8,1])
+            with hc1:
+                label = "🟢 Most recent run" if run_idx == 0 else f"Run #{len(st.session_state.route_history)-run_idx}"
+                st.markdown(f"### 📅 {timestamp}")
+                st.caption(label)
+            with hc2:
+                st.write("")
+                if st.button("🗑️ Delete", key=f"del_run_{run_idx}"):
+                    st.session_state.route_history.pop(run_idx)
+                    save_data("route_history", st.session_state.route_history)
+                    if run_idx == 0:
+                        st.session_state.routes = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
+                    st.rerun()
 
             for r in routes:
                 vol = r["volunteer"]; vol_name = vol["name"]
-                done_count = sum(1 for i in range(len(r["stops"])) if vol_name+"_"+str(i) in completed)
-                with st.expander(vol_name + " — " + str(len(r["stops"])) + " stops", expanded=(run_idx == 0)):
+                with st.expander(vol_name + " — " + str(len(r["stops"])) + " stops", expanded=(run_idx==0)):
                     st.markdown(f"**Start:** {vol['address']}")
                     st.divider()
                     for i, s in enumerate(r["stops"]):
-                        prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
-                        key = vol_name + "_" + str(i)
+                        prev = vol["address"] if i==0 else r["stops"][i-1]["address"]
+                        key = vol_name+"_"+str(i)
                         is_done = key in completed
-                        col_check, col_info = st.columns([1, 9])
-                        with col_check:
+                        cc, ci = st.columns([1,9])
+                        with cc:
                             checked = st.checkbox("", value=is_done, key=f"chk_{run_idx}_{key}")
                             if checked and not is_done:
-                                st.session_state.completed[key] = {"key": key, "address": s["address"],
-                                    "lat": s["lat"], "lng": s["lng"], "volunteer": vol_name, "stop_num": i+1,
-                                    "delivered_date": datetime.now().strftime("%b %d, %Y")}
+                                st.session_state.completed[key] = {
+                                    "key": key, "address": s["address"],
+                                    "lat": s.get("lat"), "lng": s.get("lng"),
+                                    "volunteer": vol_name, "stop_num": i+1,
+                                    "delivered_date": datetime.now().strftime("%b %d, %Y")
+                                }
                                 save_data("completed", list(st.session_state.completed.values()))
-                                if s.get("id"):
-                                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==s["id"]), None)
+                                mid = s.get("id")
+                                if mid:
+                                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==mid), None)
                                     if idx is not None:
                                         st.session_state.master_addresses[idx]["status"] = "delivered"
                                         st.session_state.master_addresses[idx]["delivered_date"] = datetime.now().strftime("%b %d, %Y")
@@ -594,46 +677,46 @@ with tab_routes:
                             elif not checked and is_done:
                                 del st.session_state.completed[key]
                                 save_data("completed", list(st.session_state.completed.values()))
-                                if s.get("id"):
-                                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==s["id"]), None)
+                                mid = s.get("id")
+                                if mid:
+                                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==mid), None)
                                     if idx is not None:
                                         st.session_state.master_addresses[idx]["status"] = "pending"
                                         save_data("master_addresses", st.session_state.master_addresses)
                                 st.rerun()
-                        with col_info:
-                            note_text = f" — *{s['note']}*" if s.get("note") else ""
-                            contact_text = f" · 👤 {s['contact']}" if s.get("contact") else ""
+                        with ci:
+                            note_t = f" — *{s['note']}*" if s.get("note") else ""
+                            cont_t = f" · 👤 {s['contact']}" if s.get("contact") else ""
                             if is_done:
-                                delivered_date = completed[key].get("delivered_date", "")
-                                date_text = f" · 📅 {delivered_date}" if delivered_date else ""
-                                st.markdown(f"~~**Stop {i+1}:** {s['address']}~~ ✅{contact_text}{note_text}{date_text}")
+                                dd = completed[key].get("delivered_date","")
+                                dt = f" · 📅 {dd}" if dd else ""
+                                st.markdown(f"~~**Stop {i+1}:** {s['address']}~~ ✅{cont_t}{note_t}{dt}")
                             else:
-                                st.markdown(f"**Stop {i+1}:** {s['address']}{contact_text}{note_text}")
+                                st.markdown(f"**Stop {i+1}:** {s['address']}{cont_t}{note_t}")
                             st.markdown(f"[Get Directions]({gmaps_dir(prev, s['address'])})")
                     st.divider()
                     st.markdown(f"**Return home:** {vol['address']}")
-
             st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — EMAILS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_emails:
-    if "routes" not in st.session_state or not st.session_state.routes:
+    if not st.session_state.get("routes"):
         st.info("Run the optimizer first on the Delivery Run tab.")
     else:
         st.subheader("📧 Volunteer Route Emails")
-        st.caption("Click 'Open in Mail App' to send directly, or copy the text below.")
         for r in st.session_state.routes:
-            vol = r["volunteer"]; vol_email = vol.get("email","")
-            email_body = generate_email_body(r)
-            subject = "Conway for Congress - Your Yard Sign Delivery Route"
-            with st.expander("Email for " + vol["name"] + " — " + (vol_email if vol_email else "no email on file"), expanded=True):
-                if vol_email:
+            vol = r["volunteer"]; ve = vol.get("email","")
+            body = generate_email(r)
+            subj = "Conway for Congress - Your Yard Sign Delivery Route"
+            with st.expander("Email for " + vol["name"] + " — " + (ve if ve else "no email on file"), expanded=True):
+                if ve:
                     st.markdown(
-                        f'<a href="{mailto_link(vol_email, subject, email_body)}" style="display:inline-block;padding:10px 20px;background:#2563eb;color:white;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;">Open in Mail App</a>',
-                        unsafe_allow_html=True)
-                    st.caption(f"Sends to: {vol_email}")
+                        f'<a href="{mailto_link(ve, subj, body)}" style="display:inline-block;padding:10px 20px;'
+                        f'background:#2563eb;color:white;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;">'
+                        f'Open in Mail App</a>', unsafe_allow_html=True)
+                    st.caption(f"Sends to: {ve}")
                 else:
                     st.warning("No email on file — add it in the Volunteers tab.")
-                st.text_area("Or copy manually:", value=email_body, height=300, key=f"email_{vol['name']}")
+                st.text_area("Or copy manually:", value=body, height=300, key=f"email_{vol['name']}")
