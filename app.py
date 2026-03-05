@@ -153,7 +153,7 @@ def geocode_address(address: str):
         return None, None
     return loc.latitude, loc.longitude
 
-# ── Email summary generator ────────────────────────────────────────────────────
+# ── Email generator ────────────────────────────────────────────────────────────
 def generate_email(route):
     vol = route["volunteer"]
     stops = route["stops"]
@@ -177,12 +177,12 @@ def generate_email(route):
 if "loaded" not in st.session_state:
     saved_vols = load_data("volunteers")
     saved_dels = load_data("deliveries")
+    saved_completed = load_data("completed")
     st.session_state.volunteers = saved_vols if saved_vols else [{"name": "", "address": ""}]
     st.session_state.deliveries = saved_dels if saved_dels else [{"address": "", "note": ""}]
+    # completed is stored as list of dicts: [{key, address, lat, lng, volunteer}]
+    st.session_state.completed = {c["key"]: c for c in saved_completed} if saved_completed else {}
     st.session_state.loaded = True
-
-if "completed" not in st.session_state:
-    st.session_state.completed = {}
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
@@ -195,8 +195,6 @@ with tab_input:
 
     with col1:
         st.subheader("👤 Volunteers")
-        st.caption("Add each volunteer's name and home address.")
-
         for i, v in enumerate(st.session_state.volunteers):
             with st.container(border=True):
                 color_dot = f'<span style="color:{HEX_COLORS[i % len(HEX_COLORS)]};font-size:18px;">●</span>'
@@ -213,15 +211,12 @@ with tab_input:
                         st.session_state.volunteers.pop(i)
                         save_data("volunteers", st.session_state.volunteers)
                         st.rerun()
-
         if st.button("＋ Add Volunteer"):
             st.session_state.volunteers.append({"name": "", "address": ""})
             st.rerun()
 
     with col2:
         st.subheader("📦 Delivery Addresses")
-        st.caption("Paste one address per line, or add individually. Add optional notes per stop.")
-
         bulk = st.text_area(
             "Bulk import (one address per line)",
             placeholder="123 Oak St, Baltimore, MD\n456 Elm Ave, Towson, MD\n...",
@@ -249,15 +244,13 @@ with tab_input:
                         st.rerun()
                 st.session_state.deliveries[i]["note"] = st.text_input(
                     "Note", value=d.get("note", ""), key=f"dnote_{i}",
-                    placeholder="e.g. leave at side door, call ahead... (optional)"
+                    placeholder="e.g. leave at side door (optional)"
                 )
-
         if st.button("＋ Add address"):
             st.session_state.deliveries.append({"address": "", "note": ""})
             st.rerun()
 
     st.divider()
-
     col_save, col_clear, col_optimize = st.columns(3)
 
     with col_save:
@@ -274,6 +267,7 @@ with tab_input:
             st.session_state.routes = []
             save_data("volunteers", st.session_state.volunteers)
             save_data("deliveries", st.session_state.deliveries)
+            save_data("completed", [])
             st.rerun()
 
     with col_optimize:
@@ -288,7 +282,6 @@ with tab_input:
             else:
                 save_data("volunteers", st.session_state.volunteers)
                 save_data("deliveries", st.session_state.deliveries)
-                st.session_state.completed = {}
 
                 with st.spinner("Geocoding addresses..."):
                     vol_results = []
@@ -356,9 +349,18 @@ with tab_map:
         st.info("Run the optimizer first on the Input tab.")
     else:
         routes = st.session_state.routes
+        completed = st.session_state.completed
+
         all_lats = [r["volunteer"]["lat"] for r in routes] + [s["lat"] for r in routes for s in r["stops"]]
         all_lngs = [r["volunteer"]["lng"] for r in routes] + [s["lng"] for r in routes for s in r["stops"]]
         center = (sum(all_lats)/len(all_lats), sum(all_lngs)/len(all_lngs))
+
+        # Progress summary
+        total_stops = sum(len(r["stops"]) for r in routes)
+        total_done = len(completed)
+        if total_stops > 0:
+            pct = int(total_done / total_stops * 100)
+            st.progress(pct / 100, text=f"🚩 {total_done} of {total_stops} signs delivered ({pct}%)")
 
         m = folium.Map(location=center, zoom_start=12, tiles="CartoDB positron")
 
@@ -386,68 +388,108 @@ with tab_map:
 
             for i, stop in enumerate(r["stops"]):
                 prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
-                completed = st.session_state.completed.get(f"{vol['name']}_{i}", False)
+                key = f"{vol['name']}_{i}"
+                is_done = key in completed
                 note_html = f"<br><i>📝 {stop['note']}</i>" if stop.get("note") else ""
-                folium.Marker(
-                    location=[stop["lat"], stop["lng"]],
-                    popup=folium.Popup(
-                        f"<b>Stop {i+1}</b> {'✅' if completed else ''}<br>{stop['address']}{note_html}<br>"
-                        f"<a href='{google_maps_directions(prev, stop['address'])}' target='_blank'>📍 Directions</a>",
-                        max_width=250
-                    ),
-                    tooltip=f"Stop {i+1} → {vol['name']}",
-                    icon=folium.DivIcon(
-                        html=f"""<div style="background:{'#d1fae5' if completed else 'white'};color:{hex_c};
-                            border:2px solid {hex_c};border-radius:50%;width:26px;height:26px;
-                            display:flex;align-items:center;justify-content:center;font-weight:bold;
-                            font-size:12px;box-shadow:0 2px 4px rgba(0,0,0,0.25)">
-                            {'✓' if completed else i+1}</div>""",
-                        icon_size=(26, 26), icon_anchor=(13, 13)
-                    ),
-                ).add_to(m)
 
+                if is_done:
+                    # Green pin for completed
+                    folium.Marker(
+                        location=[stop["lat"], stop["lng"]],
+                        popup=folium.Popup(
+                            f"<b>✅ Delivered!</b><br>{stop['address']}{note_html}<br>"
+                            f"<i>Delivered by {vol['name']}</i>",
+                            max_width=250
+                        ),
+                        tooltip=f"✅ Delivered — Stop {i+1} ({vol['name']})",
+                        icon=folium.Icon(color="green", icon="check", prefix="fa"),
+                    ).add_to(m)
+                else:
+                    # Numbered pin for pending
+                    folium.Marker(
+                        location=[stop["lat"], stop["lng"]],
+                        popup=folium.Popup(
+                            f"<b>Stop {i+1}</b><br>{stop['address']}{note_html}<br>"
+                            f"<a href='{google_maps_directions(prev, stop['address'])}' target='_blank'>📍 Directions</a>",
+                            max_width=250
+                        ),
+                        tooltip=f"Stop {i+1} → {vol['name']}",
+                        icon=folium.DivIcon(
+                            html=f"""<div style="background:white;color:{hex_c};border:2px solid {hex_c};
+                                border-radius:50%;width:26px;height:26px;display:flex;align-items:center;
+                                justify-content:center;font-weight:bold;font-size:12px;
+                                box-shadow:0 2px 4px rgba(0,0,0,0.25)">{i+1}</div>""",
+                            icon_size=(26, 26), icon_anchor=(13, 13)
+                        ),
+                    ).add_to(m)
+
+        # Legend
         legend_html = "<div style='position:fixed;bottom:30px;left:30px;z-index:1000;background:white;padding:12px 16px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);font-family:sans-serif;font-size:13px'>"
         legend_html += "<b>Volunteers</b><br>"
         for r in routes:
-            legend_html += f"<span style='color:{r['hex']}'>●</span> {r['volunteer']['name']} &nbsp;({len(r['stops'])} stops, {r['distance_miles']} mi)<br>"
+            done = sum(1 for i in range(len(r["stops"])) if f"{r['volunteer']['name']}_{i}" in completed)
+            legend_html += f"<span style='color:{r['hex']}'>●</span> {r['volunteer']['name']} &nbsp;({done}/{len(r['stops'])} done, {r['distance_miles']} mi)<br>"
+        legend_html += "<br><span style='color:green'>●</span> Delivered &nbsp; <span style='color:#888'>●</span> Pending"
         legend_html += "</div>"
         m.get_root().html.add_child(folium.Element(legend_html))
 
-        st_folium(m, use_container_width=True, height=580)
+        st_folium(m, use_container_width=True, height=560)
 
 with tab_routes:
     if "routes" not in st.session_state or not st.session_state.routes:
         st.info("Run the optimizer first on the Input tab.")
     else:
         routes = st.session_state.routes
+        completed = st.session_state.completed
 
         summary = pd.DataFrame([{
             "Volunteer": r["volunteer"]["name"],
             "Deliveries": len(r["stops"]),
             "Miles": r["distance_miles"],
-            "Completed": sum(1 for i in range(len(r["stops"])) if st.session_state.completed.get(f"{r['volunteer']['name']}_{i}", False)),
+            "Completed": f"{sum(1 for i in range(len(r['stops'])) if f\"{r['volunteer']['name']}_{i}\" in completed)}/{len(r['stops'])}",
         } for r in routes])
         st.dataframe(summary, use_container_width=True, hide_index=True)
         st.divider()
 
         for r in routes:
             vol = r["volunteer"]
-            completed_count = sum(1 for i in range(len(r["stops"])) if st.session_state.completed.get(f"{vol['name']}_{i}", False))
-            with st.expander(f"📍 {vol['name']} — {len(r['stops'])} stops ({r['distance_miles']} mi) — {completed_count}/{len(r['stops'])} completed", expanded=True):
-                steps = [{"#": "🏠", "Address": vol["address"], "Note": "Start (home)", "Done": False, "Google Maps": google_maps_url(vol["address"])}]
+            done_count = sum(1 for i in range(len(r["stops"])) if f"{vol['name']}_{i}" in completed)
+            with st.expander(f"📍 {vol['name']} — {done_count}/{len(r['stops'])} completed ({r['distance_miles']} mi)", expanded=True):
+                st.markdown(f"🏠 **Start:** {vol['address']}")
+                st.divider()
                 for i, s in enumerate(r["stops"]):
                     prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
                     key = f"{vol['name']}_{i}"
-                    col_check, col_info = st.columns([1, 8])
+                    is_done = key in completed
+                    col_check, col_info = st.columns([1, 9])
                     with col_check:
-                        checked = st.checkbox("", value=st.session_state.completed.get(key, False), key=f"chk_{key}")
-                        st.session_state.completed[key] = checked
+                        checked = st.checkbox("", value=is_done, key=f"chk_{key}")
+                        if checked and not is_done:
+                            # Mark as completed — save to Supabase
+                            st.session_state.completed[key] = {
+                                "key": key,
+                                "address": s["address"],
+                                "lat": s["lat"],
+                                "lng": s["lng"],
+                                "volunteer": vol["name"],
+                                "stop_num": i + 1,
+                            }
+                            save_data("completed", list(st.session_state.completed.values()))
+                            st.rerun()
+                        elif not checked and is_done:
+                            # Unmark
+                            del st.session_state.completed[key]
+                            save_data("completed", list(st.session_state.completed.values()))
+                            st.rerun()
                     with col_info:
                         note_text = f" — 📝 *{s['note']}*" if s.get("note") else ""
-                        status = "~~" if checked else ""
-                        st.markdown(f"**Stop {i+1}**: {status}{s['address']}{status}{note_text}")
+                        if is_done:
+                            st.markdown(f"~~**Stop {i+1}:** {s['address']}~~ ✅{note_text}")
+                        else:
+                            st.markdown(f"**Stop {i+1}:** {s['address']}{note_text}")
                         st.markdown(f"[📍 Directions]({google_maps_directions(prev, s['address'])})")
-                st.markdown(f"🏠 **Return home**: {vol['address']}")
+                st.divider()
+                st.markdown(f"🏠 **Return home:** {vol['address']}")
 
 with tab_emails:
     if "routes" not in st.session_state or not st.session_state.routes:
@@ -455,14 +497,12 @@ with tab_emails:
     else:
         st.subheader("📧 Volunteer Route Emails")
         st.caption("Copy and send each email to the corresponding volunteer.")
-
         for r in st.session_state.routes:
             vol = r["volunteer"]
             with st.expander(f"📧 Email for {vol['name']} ({len(r['stops'])} stops, {r['distance_miles']} mi)", expanded=False):
-                email_text = generate_email(r)
                 st.text_area(
                     "Copy this email:",
-                    value=email_text,
+                    value=generate_email(r),
                     height=350,
                     key=f"email_{vol['name']}"
                 )
