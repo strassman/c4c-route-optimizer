@@ -76,7 +76,6 @@ def login_account(email, password):
 
 # ── Auth gate ──────────────────────────────────────────────────────────────────
 if "campaign_id" not in st.session_state:
-    st.set_page_config(page_title="Campaign Route Optimizer", page_icon="🗺️", layout="centered")
     st.title("🗺️ Campaign Yard Sign Route Optimizer")
     st.caption("Manage volunteers, plan delivery runs, and track every sign on the map.")
     st.divider()
