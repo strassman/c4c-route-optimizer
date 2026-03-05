@@ -2,7 +2,6 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
 import pandas as pd
 import math
 import requests
@@ -168,10 +167,26 @@ def mailto_link(to, subject, body):
 
 @st.cache_data(show_spinner=False)
 def geocode_address(address: str):
-    geolocator = Nominatim(user_agent="c4c_route_optimizer")
-    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
-    loc = geocode(address)
-    return (loc.latitude, loc.longitude) if loc else (None, None)
+    # Try Census Bureau first — fast, free, no key, US addresses only
+    try:
+        url = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+        params = {"address": address, "benchmark": "2020", "format": "json"}
+        r = requests.get(url, params=params, timeout=5)
+        matches = r.json().get("result", {}).get("addressMatches", [])
+        if matches:
+            coords = matches[0]["coordinates"]
+            return coords["y"], coords["x"]
+    except:
+        pass
+    # Fallback to Nominatim if Census fails
+    try:
+        geolocator = Nominatim(user_agent="campaign_route_optimizer")
+        loc = geolocator.geocode(address, timeout=5)
+        if loc:
+            return loc.latitude, loc.longitude
+    except:
+        pass
+    return None, None
 
 # ── TSP ────────────────────────────────────────────────────────────────────────
 def nearest_neighbor(dm, start=0):
@@ -299,6 +314,16 @@ if st.session_state.get("loaded_for") != cid:
 
 def get_master_by_id(aid):
     return next((a for a in st.session_state.master_addresses if a["id"] == aid), None)
+
+def add_to_master(entry):
+    """Geocode immediately when adding an address so the map is instant."""
+    if not entry.get("lat") or not entry.get("lng"):
+        lat, lng = geocode_address(entry["address"])
+        if lat:
+            entry["lat"] = lat
+            entry["lng"] = lng
+    st.session_state.master_addresses.append(entry)
+    save_data("master_addresses", st.session_state.master_addresses)
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 cname = st.session_state.get("campaign_name", "Campaign")
@@ -467,20 +492,30 @@ with tab_addresses:
                 with c1:
                     if st.button("✅ Import All to Master List", type="primary"):
                         existing_addrs = {a["address"].lower() for a in st.session_state.master_addresses}
-                        added = 0
-                        for p in parsed:
-                            if p["address"].lower() not in existing_addrs:
+                        new_entries = [p for p in parsed if p["address"].lower() not in existing_addrs]
+                        if new_entries:
+                            prog = st.progress(0, text=f"Geocoding 0/{len(new_entries)}...")
+                            for idx, p in enumerate(new_entries):
+                                lat, lng = geocode_address(p["address"])
+                                if lat: p["lat"] = lat; p["lng"] = lng
                                 st.session_state.master_addresses.append(p)
-                                added += 1
-                        save_data("master_addresses", st.session_state.master_addresses)
-                        st.toast(f"✅ Imported {added} new addresses!", icon="📂")
+                                prog.progress((idx+1)/len(new_entries), text=f"Geocoding {idx+1}/{len(new_entries)}...")
+                            save_data("master_addresses", st.session_state.master_addresses)
+                        st.toast(f"✅ Imported {len(new_entries)} new addresses!", icon="📂")
                         st.rerun()
                 with c2:
                     if st.button("➕ Also Add to Current Delivery Run"):
                         existing_addrs = {a["address"].lower() for a in st.session_state.master_addresses}
-                        for p in parsed:
-                            if p["address"].lower() not in existing_addrs:
+                        new_entries = [p for p in parsed if p["address"].lower() not in existing_addrs]
+                        if new_entries:
+                            prog = st.progress(0, text=f"Geocoding 0/{len(new_entries)}...")
+                            for idx, p in enumerate(new_entries):
+                                lat, lng = geocode_address(p["address"])
+                                if lat: p["lat"] = lat; p["lng"] = lng
                                 st.session_state.master_addresses.append(p)
+                                prog.progress((idx+1)/len(new_entries), text=f"Geocoding {idx+1}/{len(new_entries)}...")
+                            save_data("master_addresses", st.session_state.master_addresses)
+                        for p in parsed:
                             entry = next((a for a in st.session_state.master_addresses if a["address"].lower() == p["address"].lower()), None)
                             if entry and entry["id"] not in st.session_state.run_address_ids:
                                 st.session_state.run_address_ids.append(entry["id"])
@@ -508,12 +543,10 @@ with tab_addresses:
         if st.button("Add Address", type="primary", key="na_add"):
             if na_street and na_city and na_state and na_zip:
                 full_addr = f"{na_street}, {na_city}, {na_state} {na_zip}"
-                st.session_state.master_addresses.append({
-                    "id": str(uuid.uuid4()), "address": full_addr,
-                    "contact": na_contact, "phone": na_phone,
-                    "email": na_email, "note": na_note, "status": "pending"
-                })
-                save_data("master_addresses", st.session_state.master_addresses)
+                with st.spinner("Saving..."):
+                    add_to_master({"id": str(uuid.uuid4()), "address": full_addr,
+                        "contact": na_contact, "phone": na_phone,
+                        "email": na_email, "note": na_note, "status": "pending"})
                 st.toast(f"Added: {full_addr}", icon="📍")
                 st.rerun()
             else:
@@ -749,8 +782,8 @@ with tab_run:
                     e = {"id": str(uuid.uuid4()), "address": full_addr,
                          "contact": nr_contact, "phone": nr_phone,
                          "note": nr_note, "status": "pending"}
-                    st.session_state.master_addresses.append(e)
-                    save_data("master_addresses", st.session_state.master_addresses)
+                    with st.spinner("Saving..."):
+                        add_to_master(e)
                     st.session_state.run_address_ids.append(e["id"])
                     save_data("run_address_ids", st.session_state.run_address_ids)
                     st.toast(f"Added: {full_addr}", icon="📍")
@@ -764,11 +797,15 @@ with tab_run:
                                 placeholder="456 Elm Ave, Baltimore, MD\n789 Oak St, Baltimore, MD")
             if st.button("Import", key="run_bulk_btn"):
                 lines = [l.strip() for l in bulk.splitlines() if l.strip()]
-                for l in lines:
+                prog = st.progress(0, text=f"Geocoding 0/{len(lines)}...")
+                for idx, l in enumerate(lines):
                     e = {"id": str(uuid.uuid4()), "address": l,
                          "contact": "", "phone": "", "note": "", "status": "pending"}
+                    lat, lng = geocode_address(l)
+                    if lat: e["lat"] = lat; e["lng"] = lng
                     st.session_state.master_addresses.append(e)
                     st.session_state.run_address_ids.append(e["id"])
+                    prog.progress((idx+1)/len(lines), text=f"Geocoding {idx+1}/{len(lines)}...")
                 save_data("master_addresses", st.session_state.master_addresses)
                 save_data("run_address_ids", st.session_state.run_address_ids)
                 st.toast(f"Imported {len(lines)} addresses", icon="📋")
@@ -1021,28 +1058,12 @@ with tab_map:
 
     else:
         # ── DEFAULT MASTER MAP VIEW ──
-        ungeocoded = [i for i,a in enumerate(st.session_state.master_addresses)
-                      if not a.get("lat") or not a.get("lng")]
-        if ungeocoded:
-            # Only geocode up to 5 at a time to avoid blocking the page
-            batch = ungeocoded[:5]
-            with st.spinner(f"Locating {len(ungeocoded)} address{'es' if len(ungeocoded)!=1 else ''} on map... ({len(ungeocoded)} remaining)"):
-                needs_save = False
-                for i in batch:
-                    a = st.session_state.master_addresses[i]
-                    lat, lng = geocode_address(a["address"])
-                    if lat:
-                        st.session_state.master_addresses[i]["lat"] = lat
-                        st.session_state.master_addresses[i]["lng"] = lng
-                        needs_save = True
-                if needs_save:
-                    save_data("master_addresses", st.session_state.master_addresses)
-            if len(ungeocoded) > 5:
-                st.rerun()  # come back for next batch
-
         geocoded       = [a for a in st.session_state.master_addresses if a.get("lat") and a.get("lng")]
         delivered_pins = [a for a in geocoded if a.get("status") == "delivered"]
         pending_pins   = [a for a in geocoded if a.get("status") != "delivered"]
+        ungeocoded     = [a for a in st.session_state.master_addresses if not a.get("lat")]
+        if ungeocoded:
+            st.caption(f"⚠️ {len(ungeocoded)} address{'es' if len(ungeocoded)!=1 else ''} could not be located on the map.")
 
         if geocoded:
             lats = [a["lat"] for a in geocoded]; lngs = [a["lng"] for a in geocoded]
