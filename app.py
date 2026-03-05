@@ -451,7 +451,7 @@ with tab_routes:
             "Email": r["volunteer"].get("email", ""),
             "Deliveries": len(r["stops"]),
             "Miles": r["distance_miles"],
-            "Completed": f"{sum(1 for i in range(len(r['stops'])) if f\"{r['volunteer']['name']}_{i}\" in completed)}/{len(r['stops'])}",
+            "Completed": str(sum(1 for i in range(len(r["stops"])) if f"{r['volunteer']['name']}_{i}" in completed)) + "/" + str(len(r["stops"])),
         } for r in routes])
         st.dataframe(summary, use_container_width=True, hide_index=True)
         st.divider()
