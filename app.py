@@ -215,16 +215,18 @@ def solve_tsp(fm, hi, stops):
 
 # ── Email ──────────────────────────────────────────────────────────────────────
 def generate_email(route):
-    vol = route["volunteer"]; stops = route["stops"]; miles = km_to_miles(route["distance_km"])
+    vol = route["volunteer"]; stops = route["stops"]
+    miles = route.get("distance_miles", "—")
+    cname = st.session_state.get("campaign_name", "the Campaign")
     lines = [f"Hi {vol['name']},",
-             f"\nThank you for volunteering to deliver yard signs for Conway for Congress!",
+             f"\nThank you for volunteering to deliver yard signs for {cname}!",
              f"\nYou have {len(stops)} stop{'s' if len(stops)>1 else ''}, covering ~{miles} miles:\n"]
     for i, s in enumerate(stops):
         prev = vol["address"] if i==0 else stops[i-1]["address"]
         note = f" -- Note: {s['note']}" if s.get("note") else ""
         lines += [f"  Stop {i+1}: {s['address']}{note}", f"  Directions: {gmaps_dir(prev, s['address'])}\n"]
     lines += [f"Return home: {vol['address']}", f"\nTotal: ~{miles} miles",
-              "\nThank you!\nConway for Congress Team"]
+              f"\nThank you!\n{cname} Team"]
     return "\n".join(lines)
 
 # ── CSV import helper ──────────────────────────────────────────────────────────
@@ -282,8 +284,9 @@ def parse_csv(uploaded_file):
         })
     return results
 
-# ── Load data ──────────────────────────────────────────────────────────────────
-if "loaded" not in st.session_state:
+# ── Load data (scoped per campaign, only once per session) ────────────────────
+cid = st.session_state.get("campaign_id", "")
+if st.session_state.get("loaded_for") != cid:
     st.session_state.volunteer_roster = load_data("volunteer_roster") or []
     st.session_state.master_addresses = load_data("master_addresses") or []
     st.session_state.run_address_ids  = load_data("run_address_ids")  or []
@@ -291,15 +294,13 @@ if "loaded" not in st.session_state:
     st.session_state.route_history    = load_data("route_history")    or []
     st.session_state.routes           = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
     st.session_state.availability     = set()
-    st.session_state.new_vol          = {"name":"","email":"","address":""}
-    st.session_state.loaded = True
+    st.session_state.proximity_data   = None
+    st.session_state.loaded_for       = cid
 
 def get_master_by_id(aid):
     return next((a for a in st.session_state.master_addresses if a["id"] == aid), None)
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
-st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
-
 cname = st.session_state.get("campaign_name", "Campaign")
 title_col, logout_col = st.columns([8, 1])
 with title_col:
@@ -1020,16 +1021,24 @@ with tab_map:
 
     else:
         # ── DEFAULT MASTER MAP VIEW ──
-        needs_save = False
-        for i, a in enumerate(master):
-            if not a.get("lat") or not a.get("lng"):
-                lat, lng = geocode_address(a["address"])
-                if lat:
-                    st.session_state.master_addresses[i]["lat"] = lat
-                    st.session_state.master_addresses[i]["lng"] = lng
-                    needs_save = True
-        if needs_save:
-            save_data("master_addresses", st.session_state.master_addresses)
+        ungeocoded = [i for i,a in enumerate(st.session_state.master_addresses)
+                      if not a.get("lat") or not a.get("lng")]
+        if ungeocoded:
+            # Only geocode up to 5 at a time to avoid blocking the page
+            batch = ungeocoded[:5]
+            with st.spinner(f"Locating {len(ungeocoded)} address{'es' if len(ungeocoded)!=1 else ''} on map... ({len(ungeocoded)} remaining)"):
+                needs_save = False
+                for i in batch:
+                    a = st.session_state.master_addresses[i]
+                    lat, lng = geocode_address(a["address"])
+                    if lat:
+                        st.session_state.master_addresses[i]["lat"] = lat
+                        st.session_state.master_addresses[i]["lng"] = lng
+                        needs_save = True
+                if needs_save:
+                    save_data("master_addresses", st.session_state.master_addresses)
+            if len(ungeocoded) > 5:
+                st.rerun()  # come back for next batch
 
         geocoded       = [a for a in st.session_state.master_addresses if a.get("lat") and a.get("lng")]
         delivered_pins = [a for a in geocoded if a.get("status") == "delivered"]
