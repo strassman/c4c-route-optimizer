@@ -221,54 +221,108 @@ tab_roster, tab_addresses, tab_run, tab_map, tab_routes, tab_emails = st.tabs([
 with tab_roster:
     st.subheader("👥 Volunteer Roster")
 
-    # ── Add new volunteer form ──
+    # ── Add new volunteer manually ──
     with st.container(border=True):
         st.markdown("**Add New Volunteer**")
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         with c1:
-            new_name = st.text_input("Name", key="new_vol_name", placeholder="Full name")
+            new_name  = st.text_input("Full Name*", key="new_vol_name", placeholder="Jane Smith")
+            new_email = st.text_input("Email", key="new_vol_email", placeholder="jane@email.com")
+            new_phone = st.text_input("Phone", key="new_vol_phone", placeholder="410-555-0100")
         with c2:
-            new_email = st.text_input("Email", key="new_vol_email", placeholder="email@example.com")
-        with c3:
-            new_addr = st.text_input("Home address", key="new_vol_addr", placeholder="123 Main St, Baltimore, MD")
+            new_street = st.text_input("Street Address*", key="new_vol_street", placeholder="123 Main St")
+            nc1, nc2, nc3 = st.columns(3)
+            with nc1: new_city  = st.text_input("City*",  key="new_vol_city",  placeholder="Baltimore")
+            with nc2: new_state = st.text_input("State*", key="new_vol_state", placeholder="MD")
+            with nc3: new_zip   = st.text_input("ZIP*",   key="new_vol_zip",   placeholder="21201")
         if st.button("➕ Add to Roster", type="primary"):
-            if new_name and new_addr:
+            if new_name and new_street and new_city and new_state and new_zip:
+                full_addr = f"{new_street}, {new_city}, {new_state} {new_zip}"
                 st.session_state.volunteer_roster.append({
-                    "name": new_name, "email": new_email, "address": new_addr
+                    "name": new_name, "email": new_email,
+                    "phone": new_phone, "address": full_addr
                 })
                 save_data("volunteer_roster", st.session_state.volunteer_roster)
                 st.toast(f"✅ {new_name} added to roster!", icon="👤")
                 st.rerun()
             else:
-                st.warning("Name and address are required.")
+                st.warning("Name, street, city, state, and ZIP are required.")
 
     st.divider()
 
-    # ── Roster table in expander ──
+    # ── CSV import ──
+    with st.expander("📂 Import Volunteers from CSV (NationBuilder, NGP VAN, Action Network)", expanded=False):
+        st.caption("Upload a CSV export from your campaign database. The system will auto-detect name, email, phone, and address columns.")
+        vol_csv = st.file_uploader("Upload CSV", type=["csv"], key="vol_csv_upload")
+        if vol_csv:
+            try:
+                df_v = pd.read_csv(vol_csv, dtype=str).fillna("")
+                fname_col = detect_column(df_v.columns, FIELD_CANDIDATES["first_name"])
+                lname_col = detect_column(df_v.columns, FIELD_CANDIDATES["last_name"])
+                email_col = detect_column(df_v.columns, FIELD_CANDIDATES["email"])
+                phone_col = detect_column(df_v.columns, FIELD_CANDIDATES["phone"])
+                addr_col  = detect_column(df_v.columns, FIELD_CANDIDATES["address"])
+                city_col  = detect_column(df_v.columns, FIELD_CANDIDATES["city"])
+                state_col = detect_column(df_v.columns, FIELD_CANDIDATES["state"])
+                zip_col   = detect_column(df_v.columns, FIELD_CANDIDATES["zip"])
+
+                parsed_vols = []
+                for _, row in df_v.iterrows():
+                    fname = row[fname_col].strip() if fname_col else ""
+                    lname = row[lname_col].strip() if lname_col else ""
+                    name  = (fname + " " + lname).strip()
+                    if not name: continue
+                    addr = row[addr_col].strip() if addr_col else ""
+                    city  = row[city_col].strip()  if city_col  else ""
+                    state = row[state_col].strip() if state_col else ""
+                    zp    = row[zip_col].strip()   if zip_col   else ""
+                    if city or state or zp:
+                        addr = addr + ", " + ", ".join(p for p in [city, state, zp] if p)
+                    parsed_vols.append({
+                        "name":    name,
+                        "email":   row[email_col].strip() if email_col else "",
+                        "phone":   row[phone_col].strip() if phone_col else "",
+                        "address": addr,
+                    })
+
+                st.success(f"Found {len(parsed_vols)} volunteers in CSV.")
+                st.dataframe(pd.DataFrame(parsed_vols), use_container_width=True, hide_index=True)
+                if st.button("✅ Import All Volunteers", type="primary", key="import_vols"):
+                    existing = {v["name"].lower() for v in st.session_state.volunteer_roster}
+                    added = 0
+                    for pv in parsed_vols:
+                        if pv["name"].lower() not in existing:
+                            st.session_state.volunteer_roster.append(pv)
+                            added += 1
+                    save_data("volunteer_roster", st.session_state.volunteer_roster)
+                    st.toast(f"✅ Imported {added} volunteers!", icon="👥")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Could not parse CSV: {e}")
+
+    st.divider()
+
+    # ── Roster table ──
     roster = st.session_state.volunteer_roster
     if not roster:
         st.info("No volunteers yet. Add one above.")
     else:
         with st.expander(f"📋 View All Volunteers ({len(roster)})", expanded=True):
-            # Editable dataframe
             df = pd.DataFrame([{
-                "Name": v.get("name",""),
-                "Email": v.get("email",""),
+                "Name":    v.get("name",""),
+                "Email":   v.get("email",""),
+                "Phone":   v.get("phone",""),
                 "Address": v.get("address",""),
             } for v in roster])
-            edited = st.data_editor(
-                df,
-                use_container_width=True,
-                hide_index=False,
-                num_rows="fixed",
-                key="roster_editor"
-            )
+            edited = st.data_editor(df, use_container_width=True, hide_index=False,
+                                    num_rows="fixed", key="roster_editor")
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("💾 Save Changes", use_container_width=True):
                     updated = []
                     for i, row in edited.iterrows():
-                        updated.append({"name": row["Name"], "email": row["Email"], "address": row["Address"]})
+                        updated.append({"name": row["Name"], "email": row["Email"],
+                                        "phone": row.get("Phone",""), "address": row["Address"]})
                     st.session_state.volunteer_roster = updated
                     save_data("volunteer_roster", updated)
                     st.toast("Roster saved!", icon="💾")
@@ -331,20 +385,31 @@ with tab_addresses:
 
     # ── Add manually ──
     with st.expander("➕ Add address manually", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1: na = st.text_input("Address*", key="na_addr", placeholder="123 Oak St, Baltimore, MD")
-        with c2: nc = st.text_input("Contact name", key="na_contact")
-        with c3: np = st.text_input("Phone", key="na_phone")
-        nn = st.text_input("Note", key="na_note", placeholder="e.g. leave at side door")
+        c1, c2 = st.columns(2)
+        with c1:
+            na_street  = st.text_input("Street Address*", key="na_street", placeholder="123 Oak St")
+            na_contact = st.text_input("Contact Name",    key="na_contact", placeholder="John Smith")
+            na_phone   = st.text_input("Phone",           key="na_phone",   placeholder="410-555-0100")
+        with c2:
+            nc1, nc2, nc3 = st.columns(3)
+            with nc1: na_city  = st.text_input("City*",  key="na_city",  placeholder="Baltimore")
+            with nc2: na_state = st.text_input("State*", key="na_state", placeholder="MD")
+            with nc3: na_zip   = st.text_input("ZIP*",   key="na_zip",   placeholder="21201")
+            na_email = st.text_input("Email", key="na_email", placeholder="john@email.com")
+            na_note  = st.text_input("Note",  key="na_note",  placeholder="e.g. leave at side door")
         if st.button("Add Address", type="primary", key="na_add"):
-            if na:
+            if na_street and na_city and na_state and na_zip:
+                full_addr = f"{na_street}, {na_city}, {na_state} {na_zip}"
                 st.session_state.master_addresses.append({
-                    "id": str(uuid.uuid4()), "address": na, "contact": nc,
-                    "phone": np, "note": nn, "status": "pending"
+                    "id": str(uuid.uuid4()), "address": full_addr,
+                    "contact": na_contact, "phone": na_phone,
+                    "email": na_email, "note": na_note, "status": "pending"
                 })
                 save_data("master_addresses", st.session_state.master_addresses)
-                st.toast(f"Added: {na}", icon="📍")
+                st.toast(f"Added: {full_addr}", icon="📍")
                 st.rerun()
+            else:
+                st.warning("Street, city, state, and ZIP are required.")
 
     st.divider()
 
