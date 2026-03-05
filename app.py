@@ -418,11 +418,7 @@ with tab_map:
         all_lngs = [r["volunteer"]["lng"] for r in routes] + [s["lng"] for r in routes for s in r["stops"]]
         center = (sum(all_lats)/len(all_lats), sum(all_lngs)/len(all_lngs))
 
-        total_stops = sum(len(r["stops"]) for r in routes)
-        total_done = len(completed)
-        if total_stops > 0:
-            pct = int(total_done / total_stops * 100)
-            st.progress(pct / 100, text=f"🚩 {total_done} of {total_stops} signs delivered ({pct}%)")
+
 
         m = folium.Map(location=center, zoom_start=12, tiles="CartoDB positron")
 
@@ -483,29 +479,11 @@ with tab_map:
                         ),
                     ).add_to(m)
 
-        # ── Streamlit native legend (above map) ──
-        st.markdown("**Legend**")
-        leg_cols = st.columns(len(routes) + 2)
-        for ci, r in enumerate(routes):
-            vol_name = r["volunteer"]["name"]
-            done = sum(1 for i in range(len(r["stops"])) if vol_name + "_" + str(i) in completed)
-            total = len(r["stops"])
-            hex_c = r["hex"]
-            leg_cols[ci].markdown(
-                f'<span style="color:{hex_c};font-size:20px;">&#9679;</span> '
-                f'**{vol_name}** — {done}/{total} done, {r["distance_miles"]} mi',
-                unsafe_allow_html=True
-            )
-        leg_cols[len(routes)].markdown(
-            '<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign delivered',
-            unsafe_allow_html=True
-        )
-        leg_cols[len(routes)+1].markdown(
-            '<span style="color:#aaa;font-size:20px;">&#9711;</span> Pending',
-            unsafe_allow_html=True
-        )
-        st.divider()
-        st_folium(m, use_container_width=True, height=560)
+        # ── Simple legend ──
+        col_a, col_b, col_rest = st.columns([1, 1, 6])
+        col_a.markdown('<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign placed', unsafe_allow_html=True)
+        col_b.markdown('<span style="color:#aaa;font-size:20px;">&#9679;</span> Pending', unsafe_allow_html=True)
+        st_folium(m, use_container_width=True, height=580)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — ROUTES
@@ -525,8 +503,6 @@ with tab_routes:
                 "Volunteer": vol_name,
                 "Email": r["volunteer"].get("email", ""),
                 "Deliveries": len(r["stops"]),
-                "Miles": r["distance_miles"],
-                "Completed": str(done) + "/" + str(len(r["stops"])),
             })
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
         st.divider()
@@ -535,7 +511,7 @@ with tab_routes:
             vol = r["volunteer"]
             vol_name = vol["name"]
             done_count = sum(1 for i in range(len(r["stops"])) if vol_name + "_" + str(i) in completed)
-            with st.expander(vol_name + " — " + str(done_count) + "/" + str(len(r["stops"])) + " completed (" + str(r["distance_miles"]) + " mi)", expanded=True):
+            with st.expander(vol_name + " — " + str(len(r["stops"])) + " stops", expanded=True):
                 st.markdown(f"**Start:** {vol['address']}")
                 st.divider()
                 for i, s in enumerate(r["stops"]):
