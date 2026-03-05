@@ -145,8 +145,10 @@ def generate_email_body(route):
 if "loaded" not in st.session_state:
     st.session_state.volunteer_roster  = load_data("volunteer_roster") or []
     st.session_state.master_addresses  = load_data("master_addresses") or []
-    st.session_state.run_address_ids   = load_data("run_address_ids") or []   # list of IDs in current run
+    st.session_state.run_address_ids   = load_data("run_address_ids") or []
     st.session_state.completed         = {c["key"]: c for c in (load_data("completed") or [])}
+    st.session_state.route_history     = load_data("route_history") or []  # list of saved route runs
+    st.session_state.routes            = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
     st.session_state.availability      = set()
     st.session_state.loaded = True
 
@@ -474,6 +476,13 @@ with tab_run:
                         })
 
                 st.session_state.routes = routes
+                # Save to route history with timestamp — most recent first
+                run_record = {
+                    "timestamp": datetime.now().strftime("%b %d, %Y at %I:%M %p"),
+                    "routes": routes
+                }
+                st.session_state.route_history = [run_record] + (st.session_state.route_history or [])
+                save_data("route_history", st.session_state.route_history)
                 st.toast(f"✅ Routes ready — {len(del_results)} deliveries across {len(routes)} volunteers", icon="🗺️")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -544,59 +553,67 @@ with tab_map:
 # TAB 5 — ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_routes:
-    if "routes" not in st.session_state or not st.session_state.routes:
+    if not st.session_state.get("route_history"):
         st.info("Run the optimizer first on the Delivery Run tab.")
     else:
-        routes = st.session_state.routes
         completed = st.session_state.completed
 
-        for r in routes:
-            vol = r["volunteer"]; vol_name = vol["name"]
-            done_count = sum(1 for i in range(len(r["stops"])) if vol_name+"_"+str(i) in completed)
-            with st.expander(vol_name + " — " + str(len(r["stops"])) + " stops", expanded=True):
-                st.markdown(f"**Start:** {vol['address']}")
-                st.divider()
-                for i, s in enumerate(r["stops"]):
-                    prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
-                    key = vol_name + "_" + str(i)
-                    is_done = key in completed
-                    col_check, col_info = st.columns([1, 9])
-                    with col_check:
-                        checked = st.checkbox("", value=is_done, key=f"chk_{key}")
-                        if checked and not is_done:
-                            # Mark completed in routes tracker
-                            st.session_state.completed[key] = {"key": key, "address": s["address"],
-                                "lat": s["lat"], "lng": s["lng"], "volunteer": vol_name, "stop_num": i+1,
-                                "delivered_date": datetime.now().strftime("%b %d, %Y")}
-                            save_data("completed", list(st.session_state.completed.values()))
-                            # Also update master address status to delivered
-                            if s.get("id"):
-                                idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==s["id"]), None)
-                                if idx is not None:
-                                    st.session_state.master_addresses[idx]["status"] = "delivered"
-                                    save_data("master_addresses", st.session_state.master_addresses)
-                            st.rerun()
-                        elif not checked and is_done:
-                            del st.session_state.completed[key]
-                            save_data("completed", list(st.session_state.completed.values()))
-                            if s.get("id"):
-                                idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==s["id"]), None)
-                                if idx is not None:
-                                    st.session_state.master_addresses[idx]["status"] = "pending"
-                                    save_data("master_addresses", st.session_state.master_addresses)
-                            st.rerun()
-                    with col_info:
-                        note_text = f" — *{s['note']}*" if s.get("note") else ""
-                        contact_text = f" · 👤 {s['contact']}" if s.get("contact") else ""
-                        if is_done:
-                            delivered_date = completed[key].get("delivered_date", "")
-                            date_text = f" · 📅 {delivered_date}" if delivered_date else ""
-                            st.markdown(f"~~**Stop {i+1}:** {s['address']}~~ ✅{contact_text}{note_text}{date_text}")
-                        else:
-                            st.markdown(f"**Stop {i+1}:** {s['address']}{contact_text}{note_text}")
-                        st.markdown(f"[Get Directions]({gmaps_dir(prev, s['address'])})")
-                st.divider()
-                st.markdown(f"**Return home:** {vol['address']}")
+        for run_idx, run_record in enumerate(st.session_state.route_history):
+            timestamp = run_record.get("timestamp", "Unknown date")
+            routes = run_record["routes"]
+
+            st.markdown(f"## 📅 Run: {timestamp}")
+            if run_idx == 0:
+                st.caption("Most recent run")
+
+            for r in routes:
+                vol = r["volunteer"]; vol_name = vol["name"]
+                done_count = sum(1 for i in range(len(r["stops"])) if vol_name+"_"+str(i) in completed)
+                with st.expander(vol_name + " — " + str(len(r["stops"])) + " stops", expanded=(run_idx == 0)):
+                    st.markdown(f"**Start:** {vol['address']}")
+                    st.divider()
+                    for i, s in enumerate(r["stops"]):
+                        prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
+                        key = vol_name + "_" + str(i)
+                        is_done = key in completed
+                        col_check, col_info = st.columns([1, 9])
+                        with col_check:
+                            checked = st.checkbox("", value=is_done, key=f"chk_{run_idx}_{key}")
+                            if checked and not is_done:
+                                st.session_state.completed[key] = {"key": key, "address": s["address"],
+                                    "lat": s["lat"], "lng": s["lng"], "volunteer": vol_name, "stop_num": i+1,
+                                    "delivered_date": datetime.now().strftime("%b %d, %Y")}
+                                save_data("completed", list(st.session_state.completed.values()))
+                                if s.get("id"):
+                                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==s["id"]), None)
+                                    if idx is not None:
+                                        st.session_state.master_addresses[idx]["status"] = "delivered"
+                                        st.session_state.master_addresses[idx]["delivered_date"] = datetime.now().strftime("%b %d, %Y")
+                                        save_data("master_addresses", st.session_state.master_addresses)
+                                st.rerun()
+                            elif not checked and is_done:
+                                del st.session_state.completed[key]
+                                save_data("completed", list(st.session_state.completed.values()))
+                                if s.get("id"):
+                                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==s["id"]), None)
+                                    if idx is not None:
+                                        st.session_state.master_addresses[idx]["status"] = "pending"
+                                        save_data("master_addresses", st.session_state.master_addresses)
+                                st.rerun()
+                        with col_info:
+                            note_text = f" — *{s['note']}*" if s.get("note") else ""
+                            contact_text = f" · 👤 {s['contact']}" if s.get("contact") else ""
+                            if is_done:
+                                delivered_date = completed[key].get("delivered_date", "")
+                                date_text = f" · 📅 {delivered_date}" if delivered_date else ""
+                                st.markdown(f"~~**Stop {i+1}:** {s['address']}~~ ✅{contact_text}{note_text}{date_text}")
+                            else:
+                                st.markdown(f"**Stop {i+1}:** {s['address']}{contact_text}{note_text}")
+                            st.markdown(f"[Get Directions]({gmaps_dir(prev, s['address'])})")
+                    st.divider()
+                    st.markdown(f"**Return home:** {vol['address']}")
+
+            st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — EMAILS
