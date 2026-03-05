@@ -18,6 +18,7 @@ st.set_page_config(
 COLORS = ["red", "blue", "green", "orange", "purple", "darkred", "cadetblue", "darkgreen"]
 HEX_COLORS = ["#e74c3c","#3498db","#2ecc71","#f39c12","#9b59b6","#c0392b","#5f9ea0","#27ae60"]
 OSRM_BASE = "https://router.project-osrm.org"
+KM_TO_MILES = 0.621371
 
 # ── Supabase ───────────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -44,7 +45,6 @@ def save_data(key, value):
 # ── OSRM ───────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def osrm_matrix(points):
-    """Full NxN driving distance matrix in km via OSRM table API."""
     try:
         coords = ";".join(f"{lng},{lat}" for lat, lng in points)
         url = f"{OSRM_BASE}/table/v1/driving/{coords}?annotations=distance"
@@ -54,12 +54,10 @@ def osrm_matrix(points):
             return [[d / 1000 for d in row] for row in data["distances"]]
     except:
         pass
-    # Fallback to haversine
     return [[haversine(points[i], points[j]) for j in range(len(points))] for i in range(len(points))]
 
 @st.cache_data(show_spinner=False)
 def osrm_route_geometry(waypoints):
-    """Actual road polyline for a list of (lat, lng) waypoints."""
     try:
         coords = ";".join(f"{lng},{lat}" for lat, lng in waypoints)
         url = f"{OSRM_BASE}/route/v1/driving/{coords}?overview=full&geometries=geojson"
@@ -71,7 +69,7 @@ def osrm_route_geometry(waypoints):
         pass
     return [[lat, lng] for lat, lng in waypoints]
 
-# ── Haversine fallback ─────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 def haversine(a, b):
     R = 6371
     lat1, lon1 = math.radians(a[0]), math.radians(a[1])
@@ -79,6 +77,15 @@ def haversine(a, b):
     dlat, dlon = lat2 - lat1, lon2 - lon1
     h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
     return R * 2 * math.asin(math.sqrt(h))
+
+def km_to_miles(km):
+    return round(km * KM_TO_MILES, 2)
+
+def google_maps_url(address):
+    return f"https://www.google.com/maps/search/?api=1&query={address.replace(' ', '+')}"
+
+def google_maps_directions(origin, destination):
+    return f"https://www.google.com/maps/dir/{origin.replace(' ', '+')}/{destination.replace(' ', '+')}"
 
 # ── TSP ────────────────────────────────────────────────────────────────────────
 def nearest_neighbor(dist_matrix, start=0):
@@ -113,39 +120,27 @@ def two_opt(dist_matrix, route):
                     improved = True
     return route
 
-def route_cost(dist_matrix, route, home_idx):
-    """Total cost: home → route[0] → ... → route[-1] → home."""
-    cost = dist_matrix[home_idx][route[0]]
+def route_cost(full_matrix, route, home_idx):
+    cost = full_matrix[home_idx][route[0]]
     for i in range(len(route) - 1):
-        cost += dist_matrix[route[i]][route[i+1]]
-    cost += dist_matrix[route[-1]][home_idx]
+        cost += full_matrix[route[i]][route[i+1]]
+    cost += full_matrix[route[-1]][home_idx]
     return cost
 
 def solve_tsp_from_home(full_matrix, home_idx, stop_indices):
-    """
-    Solve TSP for stop_indices with home_idx as fixed start/end.
-    Tries all starting stops and picks the best overall route.
-    """
     if not stop_indices:
         return [], 0.0
-
-    # Build sub-matrix for stops only
     n = len(stop_indices)
     sub = [[full_matrix[stop_indices[i]][stop_indices[j]] for j in range(n)] for i in range(n)]
-
     best_route, best_cost = None, float("inf")
-
-    # Try nearest-neighbor from every possible starting stop
     for start in range(n):
         route = nearest_neighbor(sub, start)
         route = two_opt(sub, route)
-        # Map back to full matrix indices for cost calculation
         full_route = [stop_indices[r] for r in route]
         cost = route_cost(full_matrix, full_route, home_idx)
         if cost < best_cost:
             best_cost = cost
             best_route = full_route
-
     return best_route, round(best_cost, 2)
 
 # ── Geocoding ──────────────────────────────────────────────────────────────────
@@ -158,25 +153,42 @@ def geocode_address(address: str):
         return None, None
     return loc.latitude, loc.longitude
 
-def google_maps_url(address):
-    return f"https://www.google.com/maps/search/?api=1&query={address.replace(' ', '+')}"
-
-def google_maps_directions(origin, destination):
-    return f"https://www.google.com/maps/dir/{origin.replace(' ', '+')}/{destination.replace(' ', '+')}"
+# ── Email summary generator ────────────────────────────────────────────────────
+def generate_email(route):
+    vol = route["volunteer"]
+    stops = route["stops"]
+    miles = km_to_miles(route["distance_km"])
+    lines = []
+    lines.append(f"Hi {vol['name']},")
+    lines.append(f"\nThank you for volunteering to deliver yard signs for Conway for Congress!")
+    lines.append(f"\nYou have {len(stops)} stop{'s' if len(stops) > 1 else ''} assigned to you, covering approximately {miles} miles. Please start from your home address and follow the route below:\n")
+    for i, s in enumerate(stops):
+        prev = vol["address"] if i == 0 else stops[i-1]["address"]
+        note = f" — Note: {s['note']}" if s.get("note") else ""
+        lines.append(f"  Stop {i+1}: {s['address']}{note}")
+        lines.append(f"  Directions: {google_maps_directions(prev, s['address'])}\n")
+    lines.append(f"Return home to: {vol['address']}")
+    lines.append(f"\nTotal estimated driving: {miles} miles")
+    lines.append(f"\nThank you again for your support! Please reach out if you have any questions.")
+    lines.append(f"\nBest,\nConway for Congress Team")
+    return "\n".join(lines)
 
 # ── Load saved data ────────────────────────────────────────────────────────────
 if "loaded" not in st.session_state:
     saved_vols = load_data("volunteers")
     saved_dels = load_data("deliveries")
     st.session_state.volunteers = saved_vols if saved_vols else [{"name": "", "address": ""}]
-    st.session_state.deliveries = saved_dels if saved_dels else [{"address": ""}]
+    st.session_state.deliveries = saved_dels if saved_dels else [{"address": "", "note": ""}]
     st.session_state.loaded = True
+
+if "completed" not in st.session_state:
+    st.session_state.completed = {}
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
 st.caption("Clusters deliveries by driving distance, then finds the most efficient road-based route per volunteer.")
 
-tab_input, tab_map, tab_routes = st.tabs(["📋 Input", "🗺️ Map", "📍 Routes"])
+tab_input, tab_map, tab_routes, tab_emails = st.tabs(["📋 Input", "🗺️ Map", "📍 Routes", "📧 Emails"])
 
 with tab_input:
     col1, col2 = st.columns(2)
@@ -208,46 +220,61 @@ with tab_input:
 
     with col2:
         st.subheader("📦 Delivery Addresses")
-        st.caption("Paste one address per line, or add individually.")
+        st.caption("Paste one address per line, or add individually. Add optional notes per stop.")
 
         bulk = st.text_area(
             "Bulk import (one address per line)",
             placeholder="123 Oak St, Baltimore, MD\n456 Elm Ave, Towson, MD\n...",
-            height=120,
+            height=100,
         )
         if st.button("Import addresses"):
             lines = [l.strip() for l in bulk.splitlines() if l.strip()]
             for l in lines:
-                st.session_state.deliveries.append({"address": l})
+                st.session_state.deliveries.append({"address": l, "note": ""})
             save_data("deliveries", st.session_state.deliveries)
             st.rerun()
 
         for i, d in enumerate(st.session_state.deliveries):
-            c1, c2 = st.columns([5, 1])
-            with c1:
-                st.session_state.deliveries[i]["address"] = st.text_input(
-                    f"Stop {i+1}", value=d["address"], key=f"daddr_{i}",
-                    placeholder="Delivery address", label_visibility="collapsed"
+            with st.container(border=True):
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    st.session_state.deliveries[i]["address"] = st.text_input(
+                        f"Address {i+1}", value=d["address"], key=f"daddr_{i}",
+                        placeholder="Delivery address", label_visibility="collapsed"
+                    )
+                with c2:
+                    if st.button("✕", key=f"drem_{i}") and len(st.session_state.deliveries) > 1:
+                        st.session_state.deliveries.pop(i)
+                        save_data("deliveries", st.session_state.deliveries)
+                        st.rerun()
+                st.session_state.deliveries[i]["note"] = st.text_input(
+                    "Note", value=d.get("note", ""), key=f"dnote_{i}",
+                    placeholder="e.g. leave at side door, call ahead... (optional)"
                 )
-            with c2:
-                if st.button("✕", key=f"drem_{i}") and len(st.session_state.deliveries) > 1:
-                    st.session_state.deliveries.pop(i)
-                    save_data("deliveries", st.session_state.deliveries)
-                    st.rerun()
 
         if st.button("＋ Add address"):
-            st.session_state.deliveries.append({"address": ""})
+            st.session_state.deliveries.append({"address": "", "note": ""})
             st.rerun()
 
     st.divider()
 
-    col_save, col_optimize = st.columns(2)
+    col_save, col_clear, col_optimize = st.columns(3)
 
     with col_save:
-        if st.button("💾 Save Addresses", use_container_width=True):
+        if st.button("💾 Save", use_container_width=True):
             save_data("volunteers", st.session_state.volunteers)
             save_data("deliveries", st.session_state.deliveries)
-            st.success("Addresses saved!")
+            st.success("Saved!")
+
+    with col_clear:
+        if st.button("🗑️ Clear All", use_container_width=True):
+            st.session_state.volunteers = [{"name": "", "address": ""}]
+            st.session_state.deliveries = [{"address": "", "note": ""}]
+            st.session_state.completed = {}
+            st.session_state.routes = []
+            save_data("volunteers", st.session_state.volunteers)
+            save_data("deliveries", st.session_state.deliveries)
+            st.rerun()
 
     with col_optimize:
         if st.button("🚀 Optimize Routes", type="primary", use_container_width=True):
@@ -261,6 +288,7 @@ with tab_input:
             else:
                 save_data("volunteers", st.session_state.volunteers)
                 save_data("deliveries", st.session_state.deliveries)
+                st.session_state.completed = {}
 
                 with st.spinner("Geocoding addresses..."):
                     vol_results = []
@@ -283,17 +311,15 @@ with tab_input:
                     st.error("No delivery addresses could be geocoded.")
                     st.stop()
 
-                with st.spinner("Building driving distance matrix via OSRM..."):
-                    # All points: volunteers first, then deliveries
+                with st.spinner("Building driving distance matrix..."):
                     all_points = [(v["lat"], v["lng"]) for v in vol_results] + \
                                  [(d["lat"], d["lng"]) for d in del_results]
                     n_vols = len(vol_results)
                     full_matrix = osrm_matrix(all_points)
 
-                with st.spinner("Clustering by driving distance & optimizing routes..."):
-                    # Assign each delivery to the volunteer with shortest driving distance
+                with st.spinner("Clustering and optimizing routes..."):
                     clusters = {i: [] for i in range(n_vols)}
-                    for di, d in enumerate(del_results):
+                    for di in range(len(del_results)):
                         d_idx = n_vols + di
                         best_vol = min(range(n_vols), key=lambda vi: full_matrix[vi][d_idx])
                         clusters[best_vol].append(d_idx)
@@ -303,22 +329,19 @@ with tab_input:
                         stop_indices = clusters[vi]
                         if not stop_indices:
                             continue
-
-                        ordered_indices, dist = solve_tsp_from_home(full_matrix, vi, stop_indices)
+                        ordered_indices, dist_km = solve_tsp_from_home(full_matrix, vi, stop_indices)
                         ordered_stops = [del_results[idx - n_vols] for idx in ordered_indices]
-
-                        # Road geometry
                         waypoints = (
                             [(vol["lat"], vol["lng"])]
                             + [(s["lat"], s["lng"]) for s in ordered_stops]
                             + [(vol["lat"], vol["lng"])]
                         )
                         road_geometry = osrm_route_geometry(waypoints)
-
                         routes.append({
                             "volunteer": vol,
                             "stops": ordered_stops,
-                            "distance_km": dist,
+                            "distance_km": dist_km,
+                            "distance_miles": km_to_miles(dist_km),
                             "road_geometry": road_geometry,
                             "color": COLORS[vi % len(COLORS)],
                             "hex": HEX_COLORS[vi % len(HEX_COLORS)],
@@ -358,24 +381,27 @@ with tab_map:
             if r.get("road_geometry"):
                 folium.PolyLine(
                     r["road_geometry"], color=hex_c, weight=4, opacity=0.8,
-                    tooltip=f"{vol['name']}'s route ({r['distance_km']} km driving)"
+                    tooltip=f"{vol['name']}'s route ({r['distance_miles']} mi)"
                 ).add_to(m)
 
             for i, stop in enumerate(r["stops"]):
                 prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
+                completed = st.session_state.completed.get(f"{vol['name']}_{i}", False)
+                note_html = f"<br><i>📝 {stop['note']}</i>" if stop.get("note") else ""
                 folium.Marker(
                     location=[stop["lat"], stop["lng"]],
                     popup=folium.Popup(
-                        f"<b>Stop {i+1}</b><br>{stop['address']}<br>"
-                        f"<a href='{google_maps_directions(prev, stop['address'])}' target='_blank'>📍 Directions from previous stop</a>",
+                        f"<b>Stop {i+1}</b> {'✅' if completed else ''}<br>{stop['address']}{note_html}<br>"
+                        f"<a href='{google_maps_directions(prev, stop['address'])}' target='_blank'>📍 Directions</a>",
                         max_width=250
                     ),
                     tooltip=f"Stop {i+1} → {vol['name']}",
                     icon=folium.DivIcon(
-                        html=f"""<div style="background:white;color:{hex_c};border:2px solid {hex_c};
-                            border-radius:50%;width:26px;height:26px;display:flex;align-items:center;
-                            justify-content:center;font-weight:bold;font-size:12px;
-                            box-shadow:0 2px 4px rgba(0,0,0,0.25)">{i+1}</div>""",
+                        html=f"""<div style="background:{'#d1fae5' if completed else 'white'};color:{hex_c};
+                            border:2px solid {hex_c};border-radius:50%;width:26px;height:26px;
+                            display:flex;align-items:center;justify-content:center;font-weight:bold;
+                            font-size:12px;box-shadow:0 2px 4px rgba(0,0,0,0.25)">
+                            {'✓' if completed else i+1}</div>""",
                         icon_size=(26, 26), icon_anchor=(13, 13)
                     ),
                 ).add_to(m)
@@ -383,7 +409,7 @@ with tab_map:
         legend_html = "<div style='position:fixed;bottom:30px;left:30px;z-index:1000;background:white;padding:12px 16px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);font-family:sans-serif;font-size:13px'>"
         legend_html += "<b>Volunteers</b><br>"
         for r in routes:
-            legend_html += f"<span style='color:{r['hex']}'>●</span> {r['volunteer']['name']} &nbsp;({len(r['stops'])} stops, {r['distance_km']} km)<br>"
+            legend_html += f"<span style='color:{r['hex']}'>●</span> {r['volunteer']['name']} &nbsp;({len(r['stops'])} stops, {r['distance_miles']} mi)<br>"
         legend_html += "</div>"
         m.get_root().html.add_child(folium.Element(legend_html))
 
@@ -398,22 +424,45 @@ with tab_routes:
         summary = pd.DataFrame([{
             "Volunteer": r["volunteer"]["name"],
             "Deliveries": len(r["stops"]),
-            "Driving Distance (km)": r["distance_km"],
+            "Miles": r["distance_miles"],
+            "Completed": sum(1 for i in range(len(r["stops"])) if st.session_state.completed.get(f"{r['volunteer']['name']}_{i}", False)),
         } for r in routes])
         st.dataframe(summary, use_container_width=True, hide_index=True)
         st.divider()
 
         for r in routes:
             vol = r["volunteer"]
-            with st.expander(f"📍 {vol['name']} — {len(r['stops'])} stops ({r['distance_km']} km)", expanded=True):
-                steps = [{"#": "🏠", "Address": vol["address"], "Google Maps": google_maps_url(vol["address"]), "Note": "Start (home)"}]
+            completed_count = sum(1 for i in range(len(r["stops"])) if st.session_state.completed.get(f"{vol['name']}_{i}", False))
+            with st.expander(f"📍 {vol['name']} — {len(r['stops'])} stops ({r['distance_miles']} mi) — {completed_count}/{len(r['stops'])} completed", expanded=True):
+                steps = [{"#": "🏠", "Address": vol["address"], "Note": "Start (home)", "Done": False, "Google Maps": google_maps_url(vol["address"])}]
                 for i, s in enumerate(r["stops"]):
                     prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
-                    steps.append({"#": i+1, "Address": s["address"], "Google Maps": google_maps_directions(prev, s["address"]), "Note": ""})
-                steps.append({"#": "🏠", "Address": vol["address"], "Google Maps": google_maps_url(vol["address"]), "Note": "Return home"})
-                st.dataframe(
-                    pd.DataFrame(steps),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={"Google Maps": st.column_config.LinkColumn("Google Maps")}
+                    key = f"{vol['name']}_{i}"
+                    col_check, col_info = st.columns([1, 8])
+                    with col_check:
+                        checked = st.checkbox("", value=st.session_state.completed.get(key, False), key=f"chk_{key}")
+                        st.session_state.completed[key] = checked
+                    with col_info:
+                        note_text = f" — 📝 *{s['note']}*" if s.get("note") else ""
+                        status = "~~" if checked else ""
+                        st.markdown(f"**Stop {i+1}**: {status}{s['address']}{status}{note_text}")
+                        st.markdown(f"[📍 Directions]({google_maps_directions(prev, s['address'])})")
+                st.markdown(f"🏠 **Return home**: {vol['address']}")
+
+with tab_emails:
+    if "routes" not in st.session_state or not st.session_state.routes:
+        st.info("Run the optimizer first on the Input tab.")
+    else:
+        st.subheader("📧 Volunteer Route Emails")
+        st.caption("Copy and send each email to the corresponding volunteer.")
+
+        for r in st.session_state.routes:
+            vol = r["volunteer"]
+            with st.expander(f"📧 Email for {vol['name']} ({len(r['stops'])} stops, {r['distance_miles']} mi)", expanded=False):
+                email_text = generate_email(r)
+                st.text_area(
+                    "Copy this email:",
+                    value=email_text,
+                    height=350,
+                    key=f"email_{vol['name']}"
                 )
