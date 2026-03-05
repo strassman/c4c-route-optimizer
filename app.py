@@ -680,6 +680,17 @@ with tab_run:
             st.caption(f"**{len(run_addrs)} stop{'s' if len(run_addrs)!=1 else ''} in this run**")
 
     st.divider()
+
+    # ── Urgency + action buttons ──
+    urg_col, _ = st.columns([3, 1])
+    with urg_col:
+        urgency = st.radio(
+            "**When does this need to get done?**",
+            options=["🚗 Today — single trip, optimize full routes", "📅 Sometime soon — show proximity clusters, no routes needed"],
+            key="run_urgency",
+            horizontal=True
+        )
+
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("💾 Save Run", use_container_width=True):
@@ -692,7 +703,8 @@ with tab_run:
             save_data("run_address_ids", [])
             st.rerun()
     with c3:
-        if st.button("🚀 Optimize Routes", type="primary", use_container_width=True):
+        btn_label = "🚀 Optimize Routes" if "Today" in urgency else "🗺️ Show Proximity Map"
+        if st.button(btn_label, type="primary", use_container_width=True):
             active_vols = [v for v in st.session_state.volunteer_roster
                            if v.get("name") and v.get("address") and v["name"] in st.session_state.availability]
             run_addrs = [get_master_by_id(aid) for aid in st.session_state.run_address_ids]
@@ -715,34 +727,55 @@ with tab_run:
 
             if not del_results: st.error("No addresses could be geocoded."); st.stop()
 
-            with st.spinner("Building distance matrix..."):
-                all_pts = [(v["lat"],v["lng"]) for v in vol_results] + [(d["lat"],d["lng"]) for d in del_results]
-                n_vols = len(vol_results)
-                fm = osrm_matrix(all_pts)
+            if "Today" in urgency:
+                # ── FULL ROUTE OPTIMIZATION ──
+                with st.spinner("Building distance matrix..."):
+                    all_pts = [(v["lat"],v["lng"]) for v in vol_results] + [(d["lat"],d["lng"]) for d in del_results]
+                    n_vols = len(vol_results)
+                    fm = osrm_matrix(all_pts)
 
-            with st.spinner("Optimizing routes..."):
-                clusters = {i: [] for i in range(n_vols)}
-                for di in range(len(del_results)):
-                    bv = min(range(n_vols), key=lambda vi: fm[vi][n_vols+di])
-                    clusters[bv].append(n_vols+di)
-                routes = []
-                for vi, vol in enumerate(vol_results):
-                    if not clusters[vi]: continue
-                    oi, dk = solve_tsp(fm, vi, clusters[vi])
-                    os_ = [del_results[idx-n_vols] for idx in oi]
-                    wps = [(vol["lat"],vol["lng"])] + [(s["lat"],s["lng"]) for s in os_] + [(vol["lat"],vol["lng"])]
-                    routes.append({
-                        "volunteer": vol, "stops": os_,
-                        "distance_km": dk, "distance_miles": km_to_miles(dk),
-                        "road_geometry": osrm_route_geometry(wps),
-                        "color": COLORS[vi%len(COLORS)], "hex": HEX_COLORS[vi%len(HEX_COLORS)],
-                    })
+                with st.spinner("Optimizing routes..."):
+                    clusters = {i: [] for i in range(n_vols)}
+                    for di in range(len(del_results)):
+                        bv = min(range(n_vols), key=lambda vi: fm[vi][n_vols+di])
+                        clusters[bv].append(n_vols+di)
+                    routes = []
+                    for vi, vol in enumerate(vol_results):
+                        if not clusters[vi]: continue
+                        oi, dk = solve_tsp(fm, vi, clusters[vi])
+                        os_ = [del_results[idx-n_vols] for idx in oi]
+                        wps = [(vol["lat"],vol["lng"])] + [(s["lat"],s["lng"]) for s in os_] + [(vol["lat"],vol["lng"])]
+                        routes.append({
+                            "volunteer": vol, "stops": os_,
+                            "distance_km": dk, "distance_miles": km_to_miles(dk),
+                            "road_geometry": osrm_route_geometry(wps),
+                            "color": COLORS[vi%len(COLORS)], "hex": HEX_COLORS[vi%len(HEX_COLORS)],
+                        })
 
-            st.session_state.routes = routes
-            run_record = {"timestamp": datetime.now().strftime("%b %d, %Y at %I:%M %p"), "routes": routes}
-            st.session_state.route_history = [run_record] + (st.session_state.route_history or [])
-            save_data("route_history", st.session_state.route_history)
-            st.toast(f"Routes ready — {len(del_results)} stops across {len(routes)} volunteers", icon="🗺️")
+                st.session_state.routes = routes
+                st.session_state.proximity_data = None
+                run_record = {"timestamp": datetime.now().strftime("%b %d, %Y at %I:%M %p"), "routes": routes}
+                st.session_state.route_history = [run_record] + (st.session_state.route_history or [])
+                save_data("route_history", st.session_state.route_history)
+                st.toast(f"Routes ready — {len(del_results)} stops across {len(routes)} volunteers", icon="🗺️")
+
+            else:
+                # ── PROXIMITY CLUSTERING (no routes, just grouping) ──
+                # Assign each delivery to nearest volunteer by straight-line distance
+                clusters = {i: [] for i in range(len(vol_results))}
+                for d in del_results:
+                    best = min(range(len(vol_results)),
+                               key=lambda vi: haversine((vol_results[vi]["lat"], vol_results[vi]["lng"]),
+                                                        (d["lat"], d["lng"])))
+                    clusters[best].append(d)
+
+                st.session_state.proximity_data = {
+                    "volunteers": vol_results,
+                    "clusters": clusters,
+                    "timestamp": datetime.now().strftime("%b %d, %Y at %I:%M %p")
+                }
+                st.session_state.routes = []
+                st.toast(f"Proximity map ready — {len(del_results)} stops grouped by nearest volunteer", icon="🗺️")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — MAP
@@ -750,17 +783,14 @@ with tab_run:
 with tab_map:
     master    = st.session_state.master_addresses
     completed = st.session_state.completed
-    # routes only exist in session state for the person who just optimized
-    active_routes = st.session_state.get("routes", [])
+    active_routes   = st.session_state.get("routes", [])
+    proximity_data  = st.session_state.get("proximity_data", None)
 
     center = [39.2904, -76.6122]
     m = folium.Map(location=center, zoom_start=11, tiles="CartoDB positron")
 
     if active_routes:
-        # ── ACTIVE DELIVERY RUN VIEW ──
-        # Only shown to the user who just ran the optimizer (session state only)
-        # Show route lines + numbered stops for this run only
-        # No master address pins — just this run
+        # ── ACTIVE ROUTE MAP ──
         all_lats, all_lngs = [], []
         for r in active_routes:
             vol   = r["volunteer"]
@@ -780,8 +810,8 @@ with tab_map:
                                 tooltip=f"{vol['name']}: {r['distance_miles']} mi").add_to(m)
 
             for i, stop in enumerate(r["stops"]):
-                prev   = vol["address"] if i == 0 else r["stops"][i-1]["address"]
-                key    = vol["name"] + "_" + str(i)
+                prev    = vol["address"] if i == 0 else r["stops"][i-1]["address"]
+                key     = vol["name"] + "_" + str(i)
                 is_done = key in completed
                 note_html    = f"<br><i>📝 {stop['note']}</i>" if stop.get("note") else ""
                 contact_html = f"<br>👤 {stop['contact']}" if stop.get("contact") else ""
@@ -815,13 +845,68 @@ with tab_map:
         ca.markdown('<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign placed', unsafe_allow_html=True)
         cb.markdown('<span style="color:#aaa;font-size:20px;">&#9679;</span> Pending stop', unsafe_allow_html=True)
         cc.markdown('<span style="color:#555;font-size:13px;">📍 Your active delivery run</span>', unsafe_allow_html=True)
-        if st.button("🗺️ Switch to master map view"):
+        if st.button("🗺️ Switch to master map view", key="switch_master"):
             st.session_state.routes = []
+            st.rerun()
+
+    elif proximity_data:
+        # ── PROXIMITY CLUSTER MAP ──
+        vols     = proximity_data["volunteers"]
+        clusters = proximity_data["clusters"]
+        all_lats, all_lngs = [], []
+
+        for vi, vol in enumerate(vols):
+            hex_c = HEX_COLORS[vi % len(HEX_COLORS)]
+            color = COLORS[vi % len(COLORS)]
+            all_lats.append(vol["lat"]); all_lngs.append(vol["lng"])
+
+            # Volunteer home marker
+            folium.Marker(
+                location=[vol["lat"], vol["lng"]],
+                popup=folium.Popup(f"<b>Home: {vol['name']}</b><br>{vol['address']}<br>{len(clusters[vi])} stops nearby", max_width=220),
+                tooltip=f"Home: {vol['name']} — {len(clusters[vi])} stops",
+                icon=folium.Icon(color=color, icon="home", prefix="fa"),
+            ).add_to(m)
+
+            # Each stop as a colored circle matching the volunteer
+            for stop in clusters[vi]:
+                contact_html = f"<br>👤 {stop['contact']}" if stop.get("contact") else ""
+                note_html    = f"<br>📝 {stop['note']}" if stop.get("note") else ""
+                all_lats.append(stop["lat"]); all_lngs.append(stop["lng"])
+                folium.CircleMarker(
+                    location=[stop["lat"], stop["lng"]],
+                    radius=10, color=hex_c, fill=True, fill_color=hex_c, fill_opacity=0.7,
+                    popup=folium.Popup(f"<b>{stop['address']}</b>{contact_html}{note_html}<br><i>Nearest to {vol['name']}</i>", max_width=230),
+                    tooltip=f"{stop['address']} → {vol['name']}",
+                ).add_to(m)
+
+            # Draw a light spoke from volunteer home to each stop
+            for stop in clusters[vi]:
+                folium.PolyLine(
+                    [[vol["lat"], vol["lng"]], [stop["lat"], stop["lng"]]],
+                    color=hex_c, weight=1.5, opacity=0.3, dash_array="6"
+                ).add_to(m)
+
+        if all_lats:
+            m.location = [sum(all_lats)/len(all_lats), sum(all_lngs)/len(all_lngs)]
+            m.zoom_start = 12
+
+        # Legend
+        st.markdown(f"**📅 Proximity clusters — {proximity_data['timestamp']}**")
+        leg_cols = st.columns(len(vols) + 1)
+        for vi, vol in enumerate(vols):
+            leg_cols[vi].markdown(
+                f'<span style="color:{HEX_COLORS[vi%len(HEX_COLORS)]};font-size:18px;">&#9679;</span> '
+                f'**{vol["name"]}** ({len(clusters[vi])} stops)',
+                unsafe_allow_html=True
+            )
+        leg_cols[-1].write("")
+        if st.button("🗺️ Switch to master map view", key="switch_master_prox"):
+            st.session_state.proximity_data = None
             st.rerun()
 
     else:
         # ── DEFAULT MASTER MAP VIEW ──
-        # Geocode any addresses missing lat/lng and save them
         needs_save = False
         for i, a in enumerate(master):
             if not a.get("lat") or not a.get("lng"):
@@ -833,7 +918,7 @@ with tab_map:
         if needs_save:
             save_data("master_addresses", st.session_state.master_addresses)
 
-        geocoded = [a for a in st.session_state.master_addresses if a.get("lat") and a.get("lng")]
+        geocoded       = [a for a in st.session_state.master_addresses if a.get("lat") and a.get("lng")]
         delivered_pins = [a for a in geocoded if a.get("status") == "delivered"]
         pending_pins   = [a for a in geocoded if a.get("status") != "delivered"]
 
@@ -976,21 +1061,53 @@ with tab_emails:
 
         st.subheader("📧 Emails & Texts")
 
-        # ── Email All button ──
+        # ── Email All + Text All buttons ──
         all_emails = [r["volunteer"].get("email","") for r in routes if r["volunteer"].get("email","")]
-        if all_emails:
-            all_bodies = "\n\n---\n\n".join([generate_email(r) for r in routes])
-            all_to = ",".join(all_emails)
-            email_all_href = mailto_link(all_to, subj, all_bodies)
-            st.markdown(
-                f'<a href="{email_all_href}" style="display:inline-block;padding:12px 24px;'
-                f'background:#16a34a;color:white;border-radius:8px;text-decoration:none;'
-                f'font-weight:600;font-size:15px;margin-bottom:8px;">📧 Email All Volunteers</a>',
-                unsafe_allow_html=True
-            )
-            st.caption(f"Opens your mail app with all {len(all_emails)} volunteers in the To field")
-        else:
-            st.warning("No volunteer emails on file — add them in the Volunteers tab.")
+        all_phones = [r["volunteer"].get("phone","") for r in routes if r["volunteer"].get("phone","")]
+
+        btn_row1, btn_row2 = st.columns(2)
+        with btn_row1:
+            if all_emails:
+                all_bodies   = "\n\n---\n\n".join([generate_email(r) for r in routes])
+                email_all_href = mailto_link(",".join(all_emails), subj, all_bodies)
+                st.markdown(
+                    f'<a href="{email_all_href}" style="display:inline-block;padding:12px 24px;'
+                    f'background:#2563eb;color:white;border-radius:8px;text-decoration:none;'
+                    f'font-weight:600;font-size:15px;">📧 Email All Volunteers</a>',
+                    unsafe_allow_html=True)
+                st.caption(f"Opens mail app — {len(all_emails)} recipients")
+            else:
+                st.warning("No volunteer emails on file.")
+
+        with btn_row2:
+            if all_phones:
+                # Build a short summary text for all volunteers
+                all_text_lines = []
+                for r in routes:
+                    vp = r["volunteer"].get("phone","").replace("-","").replace(" ","").replace("(","").replace(")","")
+                    if not vp: continue
+                    stops_preview = ", ".join([s["address"].split(",")[0] for s in r["stops"][:3]])
+                    if len(r["stops"]) > 3: stops_preview += f" +{len(r['stops'])-3} more"
+                    all_text_lines.append(f"{r['volunteer']['name']}: {stops_preview}")
+                bulk_text = (
+                    f"Conway for Congress — Delivery run summary:\n" +
+                    "\n".join(all_text_lines) +
+                    "\nFull route details coming by email!"
+                )
+                # sms: with comma-separated numbers (works on iOS, opens group thread)
+                all_nums = ",".join([
+                    r["volunteer"].get("phone","").replace("-","").replace(" ","").replace("(","").replace(")","")
+                    for r in routes if r["volunteer"].get("phone","")
+                ])
+                sms_all_href = f"sms:{all_nums}&body={urllib.parse.quote(bulk_text)}"
+                st.markdown(
+                    f'<a href="{sms_all_href}" style="display:inline-block;padding:12px 24px;'
+                    f'background:#16a34a;color:white;border-radius:8px;text-decoration:none;'
+                    f'font-weight:600;font-size:15px;">💬 Text All Volunteers</a>',
+                    unsafe_allow_html=True)
+                st.caption(f"Opens Messages app — {len(all_phones)} recipients")
+            else:
+                st.warning("No volunteer phone numbers on file.")
 
         st.divider()
 
