@@ -632,19 +632,31 @@ with tab_routes:
             routes = run_record["routes"]
 
             # Header row with delete button
-            hc1, hc2 = st.columns([8,1])
+            hc1, hc2 = st.columns([7, 2])
             with hc1:
                 label = "🟢 Most recent run" if run_idx == 0 else f"Run #{len(st.session_state.route_history)-run_idx}"
                 st.markdown(f"### 📅 {timestamp}")
                 st.caption(label)
             with hc2:
                 st.write("")
-                if st.button("🗑️ Delete", key=f"del_run_{run_idx}"):
-                    st.session_state.route_history.pop(run_idx)
-                    save_data("route_history", st.session_state.route_history)
-                    if run_idx == 0:
-                        st.session_state.routes = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
-                    st.rerun()
+                confirm_key = f"confirm_del_{run_idx}"
+                if st.session_state.get(confirm_key):
+                    cc1, cc2 = st.columns(2)
+                    with cc1:
+                        if st.button("✅ Yes, delete", key=f"yes_del_{run_idx}", type="primary"):
+                            st.session_state.route_history.pop(run_idx)
+                            save_data("route_history", st.session_state.route_history)
+                            st.session_state.routes = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
+                            st.session_state[confirm_key] = False
+                            st.rerun()
+                    with cc2:
+                        if st.button("Cancel", key=f"cancel_del_{run_idx}"):
+                            st.session_state[confirm_key] = False
+                            st.rerun()
+                else:
+                    if st.button("🗑️ Delete Run", key=f"del_run_{run_idx}", use_container_width=True):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
 
             for r in routes:
                 vol = r["volunteer"]; vol_name = vol["name"]
