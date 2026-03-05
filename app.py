@@ -582,25 +582,37 @@ with tab_run:
     with col2:
         st.markdown("**Delivery Addresses for this Run**")
 
-        # Search master list
-        search_q = st.text_input("🔍 Search saved addresses", placeholder="Type street name...", key="run_search")
-        if search_q:
+        # Live autocomplete search
+        search_q = st.text_input("🔍 Search or add address", placeholder="Start typing a street name...", key="run_search")
+        if search_q and len(search_q) >= 2:
             matches = [a for a in st.session_state.master_addresses
                        if search_q.lower() in a["address"].lower()
                        and a["id"] not in st.session_state.run_address_ids]
-            for m in matches[:6]:
-                c1, c2 = st.columns([7,1])
-                with c1:
-                    icon = "✅" if m.get("status")=="delivered" else "⏳"
-                    contact = f" · {m['contact']}" if m.get("contact") else ""
-                    st.markdown(f"{icon} {m['address']}{contact}")
-                with c2:
-                    if st.button("Add", key=f"sa_{m['id']}"):
-                        st.session_state.run_address_ids.append(m["id"])
-                        save_data("run_address_ids", st.session_state.run_address_ids)
-                        st.rerun()
-            if not matches:
-                st.caption("No matches found in saved addresses.")
+            if matches:
+                st.caption(f"{len(matches)} match{'es' if len(matches)!=1 else ''} found:")
+                for match in matches[:8]:
+                    icon    = "✅" if match.get("status") == "delivered" else "⏳"
+                    contact = f" · {match['contact']}" if match.get("contact") else ""
+                    mc1, mc2 = st.columns([8, 1])
+                    with mc1:
+                        st.markdown(f"{icon} **{match['address']}**{contact}")
+                    with mc2:
+                        if st.button("＋ Add", key=f"sa_{match['id']}", use_container_width=True):
+                            st.session_state.run_address_ids.append(match["id"])
+                            save_data("run_address_ids", st.session_state.run_address_ids)
+                            st.rerun()
+            else:
+                # No match — offer to add as brand new
+                st.caption("No saved address matches. Add as new?")
+                if st.button(f"➕ Add \"{search_q}\" as new address", key="add_typed_new"):
+                    e = {"id": str(uuid.uuid4()), "address": search_q,
+                         "contact": "", "phone": "", "note": "", "status": "pending"}
+                    st.session_state.master_addresses.append(e)
+                    save_data("master_addresses", st.session_state.master_addresses)
+                    st.session_state.run_address_ids.append(e["id"])
+                    save_data("run_address_ids", st.session_state.run_address_ids)
+                    st.toast(f"Added: {search_q}", icon="📍")
+                    st.rerun()
 
         # Add new address
         with st.expander("➕ Add new address", expanded=False):
