@@ -180,51 +180,105 @@ def generate_email_body(route):
 
 # ── Load saved data ────────────────────────────────────────────────────────────
 if "loaded" not in st.session_state:
-    saved_vols = load_data("volunteers")
-    saved_dels = load_data("deliveries")
+    saved_roster    = load_data("volunteer_roster")
+    saved_dels      = load_data("deliveries")
     saved_completed = load_data("completed")
-    st.session_state.volunteers = saved_vols if saved_vols else [{"name": "", "address": "", "email": ""}]
-    st.session_state.deliveries = saved_dels if saved_dels else [{"address": "", "note": ""}]
-    st.session_state.completed = {c["key"]: c for c in saved_completed} if saved_completed else {}
+    # Roster = full list of all volunteers ever added
+    st.session_state.volunteer_roster = saved_roster if saved_roster else []
+    st.session_state.deliveries  = saved_dels if saved_dels else [{"address": "", "note": ""}]
+    st.session_state.completed   = {c["key"]: c for c in saved_completed} if saved_completed else {}
+    # availability is a set of volunteer names checked as available this run
+    st.session_state.availability = {v["name"] for v in st.session_state.volunteer_roster if v.get("available", False)}
     st.session_state.loaded = True
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
 st.caption("Clusters deliveries by driving distance, then finds the most efficient road-based route per volunteer.")
 
-tab_input, tab_map, tab_routes, tab_emails = st.tabs(["📋 Input", "🗺️ Map", "📍 Routes", "📧 Emails"])
+tab_roster, tab_input, tab_map, tab_routes, tab_emails = st.tabs([
+    "👥 Volunteers", "📋 Delivery Run", "🗺️ Map", "📍 Routes", "📧 Emails"
+])
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — VOLUNTEER ROSTER (permanent list)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_roster:
+    st.subheader("👥 Volunteer Roster")
+    st.caption("Add all your volunteers here once. For each delivery run, mark who is available on the Delivery Run tab.")
+
+    roster = st.session_state.volunteer_roster
+
+    # Existing volunteers
+    for i, v in enumerate(roster):
+        with st.container(border=True):
+            c1, c2 = st.columns([8, 1])
+            with c1:
+                color_dot = f'<span style="color:{HEX_COLORS[i % len(HEX_COLORS)]};font-size:18px;">&#9679;</span>'
+                st.markdown(f"{color_dot} **{v['name'] if v['name'] else f'Volunteer {i+1}'}**", unsafe_allow_html=True)
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    roster[i]["name"] = st.text_input("Name", value=v["name"], key=f"rname_{i}", placeholder="Full name")
+                with col2:
+                    roster[i]["email"] = st.text_input("Email", value=v.get("email", ""), key=f"remail_{i}", placeholder="email@example.com")
+                with col3:
+                    roster[i]["address"] = st.text_input("Home address", value=v.get("address", ""), key=f"raddr_{i}", placeholder="123 Main St, Baltimore, MD")
+            with c2:
+                st.write("")
+                st.write("")
+                if st.button("Remove", key=f"rrem_{i}"):
+                    st.session_state.volunteer_roster.pop(i)
+                    save_data("volunteer_roster", st.session_state.volunteer_roster)
+                    st.rerun()
+
+    col_add, col_save = st.columns(2)
+    with col_add:
+        if st.button("+ Add Volunteer", use_container_width=True):
+            st.session_state.volunteer_roster.append({"name": "", "email": "", "address": ""})
+            st.rerun()
+    with col_save:
+        if st.button("💾 Save Roster", type="primary", use_container_width=True):
+            save_data("volunteer_roster", st.session_state.volunteer_roster)
+            st.success("Roster saved!")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — DELIVERY RUN (mark availability + delivery addresses)
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_input:
+    st.subheader("📋 Delivery Run Setup")
+
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("👤 Volunteers")
-        for i, v in enumerate(st.session_state.volunteers):
-            with st.container(border=True):
-                color_dot = f'<span style="color:{HEX_COLORS[i % len(HEX_COLORS)]};font-size:18px;">&#9679;</span>'
-                st.markdown(f"{color_dot} **Volunteer {i+1}**", unsafe_allow_html=True)
-                st.session_state.volunteers[i]["name"] = st.text_input(
-                    "Name", value=v["name"], key=f"vname_{i}", placeholder="e.g. Sarah"
-                )
-                st.session_state.volunteers[i]["email"] = st.text_input(
-                    "Email", value=v.get("email", ""), key=f"vemail_{i}",
-                    placeholder="e.g. sarah@email.com"
-                )
-                st.session_state.volunteers[i]["address"] = st.text_input(
-                    "Home address", value=v["address"], key=f"vaddr_{i}",
-                    placeholder="e.g. 123 Main St, Baltimore, MD"
-                )
-                if len(st.session_state.volunteers) > 1:
-                    if st.button("Remove", key=f"vrem_{i}"):
-                        st.session_state.volunteers.pop(i)
-                        save_data("volunteers", st.session_state.volunteers)
-                        st.rerun()
-        if st.button("+ Add Volunteer"):
-            st.session_state.volunteers.append({"name": "", "address": "", "email": ""})
-            st.rerun()
+        st.markdown("**Who is available today?**")
+        st.caption("Check the volunteers who can deliver signs in this run.")
+
+        roster = st.session_state.volunteer_roster
+        if not roster:
+            st.info("No volunteers yet — add them in the Volunteers tab first.")
+        else:
+            for i, v in enumerate(roster):
+                if not v.get("name"):
+                    continue
+                color_dot = f'<span style="color:{HEX_COLORS[i % len(HEX_COLORS)]};font-size:16px;">&#9679;</span>'
+                is_available = v["name"] in st.session_state.availability
+                col_dot, col_check = st.columns([1, 9])
+                with col_dot:
+                    st.markdown(color_dot, unsafe_allow_html=True)
+                with col_check:
+                    checked = st.checkbox(
+                        f"**{v['name']}** — {v.get('address', 'no address')}",
+                        value=is_available,
+                        key=f"avail_{i}"
+                    )
+                    if checked:
+                        st.session_state.availability.add(v["name"])
+                    else:
+                        st.session_state.availability.discard(v["name"])
 
     with col2:
-        st.subheader("📦 Delivery Addresses")
+        st.markdown("**Delivery Addresses**")
+        st.caption("Paste supporter addresses who need a sign dropped off.")
+
         bulk = st.text_area(
             "Bulk import (one address per line)",
             placeholder="123 Oak St, Baltimore, MD\n456 Elm Ave, Towson, MD\n...",
@@ -262,38 +316,36 @@ with tab_input:
     col_save, col_clear, col_optimize = st.columns(3)
 
     with col_save:
-        if st.button("Save", use_container_width=True):
-            save_data("volunteers", st.session_state.volunteers)
+        if st.button("💾 Save Deliveries", use_container_width=True):
             save_data("deliveries", st.session_state.deliveries)
             st.success("Saved!")
 
     with col_clear:
-        if st.button("Clear All", use_container_width=True):
-            st.session_state.volunteers = [{"name": "", "address": "", "email": ""}]
+        if st.button("🗑️ Clear Deliveries", use_container_width=True):
             st.session_state.deliveries = [{"address": "", "note": ""}]
             st.session_state.completed = {}
             st.session_state.routes = []
-            save_data("volunteers", st.session_state.volunteers)
+            st.session_state.availability = set()
             save_data("deliveries", st.session_state.deliveries)
             save_data("completed", [])
             st.rerun()
 
     with col_optimize:
-        if st.button("Optimize Routes", type="primary", use_container_width=True):
-            vols = [v for v in st.session_state.volunteers if v["name"] and v["address"]]
+        if st.button("🚀 Optimize Routes", type="primary", use_container_width=True):
+            active_vols = [v for v in st.session_state.volunteer_roster
+                          if v.get("name") and v.get("address") and v["name"] in st.session_state.availability]
             dels = [d for d in st.session_state.deliveries if d["address"]]
 
-            if not vols:
-                st.error("Please enter at least one volunteer with a name and address.")
+            if not active_vols:
+                st.error("Please check at least one available volunteer above.")
             elif not dels:
                 st.error("Please enter at least one delivery address.")
             else:
-                save_data("volunteers", st.session_state.volunteers)
                 save_data("deliveries", st.session_state.deliveries)
 
                 with st.spinner("Geocoding addresses..."):
                     vol_results = []
-                    for v in vols:
+                    for v in active_vols:
                         lat, lng = geocode_address(v["address"])
                         if lat is None:
                             st.error(f"Could not geocode: {v['address']}")
@@ -352,9 +404,12 @@ with tab_input:
                 st.success(f"Optimized {len(del_results)} deliveries across {len(routes)} volunteers!")
                 st.balloons()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — MAP
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_map:
     if "routes" not in st.session_state or not st.session_state.routes:
-        st.info("Run the optimizer first on the Input tab.")
+        st.info("Run the optimizer first on the Delivery Run tab.")
     else:
         routes = st.session_state.routes
         completed = st.session_state.completed
@@ -395,7 +450,7 @@ with tab_map:
 
             for i, stop in enumerate(r["stops"]):
                 prev = vol["address"] if i == 0 else r["stops"][i-1]["address"]
-                key = f"{vol['name']}_{i}"
+                key = vol["name"] + "_" + str(i)
                 is_done = key in completed
                 note_html = f"<br><i>Note: {stop['note']}</i>" if stop.get("note") else ""
 
@@ -428,7 +483,6 @@ with tab_map:
                         ),
                     ).add_to(m)
 
-        # Build legend rows as separate strings to avoid f-string nesting issues
         legend_rows = ""
         for r in routes:
             vol_name = r["volunteer"]["name"]
@@ -443,31 +497,31 @@ with tab_map:
                 "</div>"
             )
 
-        legend_html = """
-        <div style='position:fixed;bottom:30px;left:30px;z-index:1000;background:white;
-            padding:14px 18px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);
-            font-family:sans-serif;font-size:13px;min-width:220px'>
-            <div style='font-weight:700;margin-bottom:8px;font-size:14px'>Map Legend</div>
-            """ + legend_rows + """
-            <div style='border-top:1px solid #e2e8f0;margin-top:8px;padding-top:8px'>
-                <div style='display:flex;align-items:center;gap:6px;margin-bottom:4px'>
-                    <div style='width:14px;height:14px;border-radius:50%;background:#27ae60;flex-shrink:0'></div>
-                    <span>Sign delivered</span>
-                </div>
-                <div style='display:flex;align-items:center;gap:6px'>
-                    <div style='width:14px;height:14px;border-radius:50%;background:white;
-                        border:2px solid #888;flex-shrink:0'></div>
-                    <span>Pending delivery</span>
-                </div>
-            </div>
-        </div>
-        """
+        legend_html = (
+            "<div style='position:fixed;bottom:30px;left:30px;z-index:1000;background:white;"
+            "padding:14px 18px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);"
+            "font-family:sans-serif;font-size:13px;min-width:220px'>"
+            "<div style='font-weight:700;margin-bottom:8px;font-size:14px'>Map Legend</div>"
+            + legend_rows +
+            "<div style='border-top:1px solid #e2e8f0;margin-top:8px;padding-top:8px'>"
+            "<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px'>"
+            "<div style='width:14px;height:14px;border-radius:50%;background:#27ae60;flex-shrink:0'></div>"
+            "<span>Sign delivered</span></div>"
+            "<div style='display:flex;align-items:center;gap:6px'>"
+            "<div style='width:14px;height:14px;border-radius:50%;background:white;"
+            "border:2px solid #888;flex-shrink:0'></div>"
+            "<span>Pending delivery</span></div>"
+            "</div></div>"
+        )
         m.get_root().html.add_child(folium.Element(legend_html))
         st_folium(m, use_container_width=True, height=560)
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_routes:
     if "routes" not in st.session_state or not st.session_state.routes:
-        st.info("Run the optimizer first on the Input tab.")
+        st.info("Run the optimizer first on the Delivery Run tab.")
     else:
         routes = st.session_state.routes
         completed = st.session_state.completed
@@ -490,7 +544,7 @@ with tab_routes:
             vol = r["volunteer"]
             vol_name = vol["name"]
             done_count = sum(1 for i in range(len(r["stops"])) if vol_name + "_" + str(i) in completed)
-            with st.expander(f"{vol_name} — {done_count}/{len(r['stops'])} completed ({r['distance_miles']} mi)", expanded=True):
+            with st.expander(vol_name + " — " + str(done_count) + "/" + str(len(r["stops"])) + " completed (" + str(r["distance_miles"]) + " mi)", expanded=True):
                 st.markdown(f"**Start:** {vol['address']}")
                 st.divider()
                 for i, s in enumerate(r["stops"]):
@@ -525,9 +579,12 @@ with tab_routes:
                 st.divider()
                 st.markdown(f"**Return home:** {vol['address']}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — EMAILS
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_emails:
     if "routes" not in st.session_state or not st.session_state.routes:
-        st.info("Run the optimizer first on the Input tab.")
+        st.info("Run the optimizer first on the Delivery Run tab.")
     else:
         st.subheader("📧 Volunteer Route Emails")
         st.caption("Click 'Open in Mail App' to send directly, or copy the text below.")
@@ -538,7 +595,7 @@ with tab_emails:
             subject = "Conway for Congress - Your Yard Sign Delivery Route"
             vol_email = vol.get("email", "")
 
-            with st.expander(f"Email for {vol['name']} — {vol_email if vol_email else 'no email on file'}", expanded=True):
+            with st.expander("Email for " + vol["name"] + " — " + (vol_email if vol_email else "no email on file"), expanded=True):
                 if vol_email:
                     mailto = mailto_link(vol_email, subject, email_body)
                     st.markdown(
@@ -549,7 +606,7 @@ with tab_emails:
                     )
                     st.caption(f"Sends to: {vol_email}")
                 else:
-                    st.warning("No email address on file — add it in the Input tab.")
+                    st.warning("No email address on file — add it in the Volunteers tab.")
                 st.text_area(
                     "Or copy manually:",
                     value=email_body,
