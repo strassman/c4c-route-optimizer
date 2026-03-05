@@ -413,6 +413,32 @@ with tab_addresses:
 
     st.divider()
 
+    # ── All addresses spreadsheet ──
+    st.markdown(f"### 📋 All Addresses — {len(master)} total")
+    if not master:
+        st.info("No addresses yet.")
+    else:
+        all_df = pd.DataFrame([{
+            "Status":         "✅ Placed" if a.get("status")=="delivered" else "⏳ Pending",
+            "Address":        a.get("address",""),
+            "Contact":        a.get("contact",""),
+            "Phone":          a.get("phone",""),
+            "Email":          a.get("email",""),
+            "Date Delivered": a.get("delivered_date",""),
+            "Note":           a.get("note",""),
+        } for a in master])
+        st.dataframe(all_df, use_container_width=True, hide_index=True,
+                     column_config={
+                         "Status": st.column_config.TextColumn(width="small"),
+                         "Date Delivered": st.column_config.TextColumn(width="medium"),
+                     })
+        # Download button
+        csv_bytes = all_df.to_csv(index=False).encode()
+        st.download_button("⬇️ Export all as CSV", data=csv_bytes,
+                           file_name="c4c_all_addresses.csv", mime="text/csv")
+
+    st.divider()
+
     # ── Pending spreadsheet ──
     st.markdown(f"### ⏳ Pending — {len(pending)} address{'es' if len(pending)!=1 else ''}")
     if not pending:
