@@ -483,37 +483,28 @@ with tab_map:
                         ),
                     ).add_to(m)
 
-        legend_rows = ""
-        for r in routes:
+        # ── Streamlit native legend (above map) ──
+        st.markdown("**Legend**")
+        leg_cols = st.columns(len(routes) + 2)
+        for ci, r in enumerate(routes):
             vol_name = r["volunteer"]["name"]
             done = sum(1 for i in range(len(r["stops"])) if vol_name + "_" + str(i) in completed)
             total = len(r["stops"])
-            miles = r["distance_miles"]
             hex_c = r["hex"]
-            legend_rows += (
-                "<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px'>"
-                "<div style='width:14px;height:14px;border-radius:50%;background:" + hex_c + ";flex-shrink:0'></div>"
-                "<span><b>" + vol_name + "</b> &mdash; " + str(done) + "/" + str(total) + " done, " + str(miles) + " mi</span>"
-                "</div>"
+            leg_cols[ci].markdown(
+                f'<span style="color:{hex_c};font-size:20px;">&#9679;</span> '
+                f'**{vol_name}** — {done}/{total} done, {r["distance_miles"]} mi',
+                unsafe_allow_html=True
             )
-
-        legend_html = (
-            "<div style='position:fixed;bottom:30px;left:30px;z-index:1000;background:white;"
-            "padding:14px 18px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);"
-            "font-family:sans-serif;font-size:13px;min-width:220px'>"
-            "<div style='font-weight:700;margin-bottom:8px;font-size:14px'>Map Legend</div>"
-            + legend_rows +
-            "<div style='border-top:1px solid #e2e8f0;margin-top:8px;padding-top:8px'>"
-            "<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px'>"
-            "<div style='width:14px;height:14px;border-radius:50%;background:#27ae60;flex-shrink:0'></div>"
-            "<span>Sign delivered</span></div>"
-            "<div style='display:flex;align-items:center;gap:6px'>"
-            "<div style='width:14px;height:14px;border-radius:50%;background:white;"
-            "border:2px solid #888;flex-shrink:0'></div>"
-            "<span>Pending delivery</span></div>"
-            "</div></div>"
+        leg_cols[len(routes)].markdown(
+            '<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign delivered',
+            unsafe_allow_html=True
         )
-        m.get_root().html.add_child(folium.Element(legend_html))
+        leg_cols[len(routes)+1].markdown(
+            '<span style="color:#aaa;font-size:20px;">&#9711;</span> Pending',
+            unsafe_allow_html=True
+        )
+        st.divider()
         st_folium(m, use_container_width=True, height=560)
 
 # ══════════════════════════════════════════════════════════════════════════════
