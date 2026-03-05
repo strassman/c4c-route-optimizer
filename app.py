@@ -6,6 +6,7 @@ from geopy.extra.rate_limiter import RateLimiter
 import pandas as pd
 import math
 import requests
+import urllib.parse
 from supabase import create_client
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -87,6 +88,10 @@ def google_maps_url(address):
 def google_maps_directions(origin, destination):
     return f"https://www.google.com/maps/dir/{origin.replace(' ', '+')}/{destination.replace(' ', '+')}"
 
+def mailto_link(to_email, subject, body):
+    params = urllib.parse.urlencode({"subject": subject, "body": body})
+    return f"mailto:{to_email}?{params}"
+
 # ── TSP ────────────────────────────────────────────────────────────────────────
 def nearest_neighbor(dist_matrix, start=0):
     n = len(dist_matrix)
@@ -154,7 +159,7 @@ def geocode_address(address: str):
     return loc.latitude, loc.longitude
 
 # ── Email generator ────────────────────────────────────────────────────────────
-def generate_email(route):
+def generate_email_body(route):
     vol = route["volunteer"]
     stops = route["stops"]
     miles = km_to_miles(route["distance_km"])
@@ -178,9 +183,8 @@ if "loaded" not in st.session_state:
     saved_vols = load_data("volunteers")
     saved_dels = load_data("deliveries")
     saved_completed = load_data("completed")
-    st.session_state.volunteers = saved_vols if saved_vols else [{"name": "", "address": ""}]
+    st.session_state.volunteers = saved_vols if saved_vols else [{"name": "", "address": "", "email": ""}]
     st.session_state.deliveries = saved_dels if saved_dels else [{"address": "", "note": ""}]
-    # completed is stored as list of dicts: [{key, address, lat, lng, volunteer}]
     st.session_state.completed = {c["key"]: c for c in saved_completed} if saved_completed else {}
     st.session_state.loaded = True
 
@@ -202,6 +206,10 @@ with tab_input:
                 st.session_state.volunteers[i]["name"] = st.text_input(
                     "Name", value=v["name"], key=f"vname_{i}", placeholder="e.g. Sarah"
                 )
+                st.session_state.volunteers[i]["email"] = st.text_input(
+                    "Email", value=v.get("email", ""), key=f"vemail_{i}",
+                    placeholder="e.g. sarah@email.com"
+                )
                 st.session_state.volunteers[i]["address"] = st.text_input(
                     "Home address", value=v["address"], key=f"vaddr_{i}",
                     placeholder="e.g. 123 Main St, Baltimore, MD"
@@ -212,7 +220,7 @@ with tab_input:
                         save_data("volunteers", st.session_state.volunteers)
                         st.rerun()
         if st.button("＋ Add Volunteer"):
-            st.session_state.volunteers.append({"name": "", "address": ""})
+            st.session_state.volunteers.append({"name": "", "address": "", "email": ""})
             st.rerun()
 
     with col2:
@@ -261,7 +269,7 @@ with tab_input:
 
     with col_clear:
         if st.button("🗑️ Clear All", use_container_width=True):
-            st.session_state.volunteers = [{"name": "", "address": ""}]
+            st.session_state.volunteers = [{"name": "", "address": "", "email": ""}]
             st.session_state.deliveries = [{"address": "", "note": ""}]
             st.session_state.completed = {}
             st.session_state.routes = []
@@ -355,7 +363,6 @@ with tab_map:
         all_lngs = [r["volunteer"]["lng"] for r in routes] + [s["lng"] for r in routes for s in r["stops"]]
         center = (sum(all_lats)/len(all_lats), sum(all_lngs)/len(all_lngs))
 
-        # Progress summary
         total_stops = sum(len(r["stops"]) for r in routes)
         total_done = len(completed)
         if total_stops > 0:
@@ -393,7 +400,6 @@ with tab_map:
                 note_html = f"<br><i>📝 {stop['note']}</i>" if stop.get("note") else ""
 
                 if is_done:
-                    # Green pin for completed
                     folium.Marker(
                         location=[stop["lat"], stop["lng"]],
                         popup=folium.Popup(
@@ -405,7 +411,6 @@ with tab_map:
                         icon=folium.Icon(color="green", icon="check", prefix="fa"),
                     ).add_to(m)
                 else:
-                    # Numbered pin for pending
                     folium.Marker(
                         location=[stop["lat"], stop["lng"]],
                         popup=folium.Popup(
@@ -423,13 +428,12 @@ with tab_map:
                         ),
                     ).add_to(m)
 
-        # Legend
         legend_html = "<div style='position:fixed;bottom:30px;left:30px;z-index:1000;background:white;padding:12px 16px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);font-family:sans-serif;font-size:13px'>"
         legend_html += "<b>Volunteers</b><br>"
         for r in routes:
             done = sum(1 for i in range(len(r["stops"])) if f"{r['volunteer']['name']}_{i}" in completed)
             legend_html += f"<span style='color:{r['hex']}'>●</span> {r['volunteer']['name']} &nbsp;({done}/{len(r['stops'])} done, {r['distance_miles']} mi)<br>"
-        legend_html += "<br><span style='color:green'>●</span> Delivered &nbsp; <span style='color:#888'>●</span> Pending"
+        legend_html += "<br><span style='color:green'>●</span> Delivered &nbsp; <span style='color:#888'>○</span> Pending"
         legend_html += "</div>"
         m.get_root().html.add_child(folium.Element(legend_html))
 
@@ -444,6 +448,7 @@ with tab_routes:
 
         summary = pd.DataFrame([{
             "Volunteer": r["volunteer"]["name"],
+            "Email": r["volunteer"].get("email", ""),
             "Deliveries": len(r["stops"]),
             "Miles": r["distance_miles"],
             "Completed": f"{sum(1 for i in range(len(r['stops'])) if f\"{r['volunteer']['name']}_{i}\" in completed)}/{len(r['stops'])}",
@@ -465,7 +470,6 @@ with tab_routes:
                     with col_check:
                         checked = st.checkbox("", value=is_done, key=f"chk_{key}")
                         if checked and not is_done:
-                            # Mark as completed — save to Supabase
                             st.session_state.completed[key] = {
                                 "key": key,
                                 "address": s["address"],
@@ -477,7 +481,6 @@ with tab_routes:
                             save_data("completed", list(st.session_state.completed.values()))
                             st.rerun()
                         elif not checked and is_done:
-                            # Unmark
                             del st.session_state.completed[key]
                             save_data("completed", list(st.session_state.completed.values()))
                             st.rerun()
@@ -496,13 +499,30 @@ with tab_emails:
         st.info("Run the optimizer first on the Input tab.")
     else:
         st.subheader("📧 Volunteer Route Emails")
-        st.caption("Copy and send each email to the corresponding volunteer.")
+        st.caption("Click 'Open in Mail' to send directly, or copy the text below.")
+
         for r in st.session_state.routes:
             vol = r["volunteer"]
-            with st.expander(f"📧 Email for {vol['name']} ({len(r['stops'])} stops, {r['distance_miles']} mi)", expanded=False):
+            email_body = generate_email_body(r)
+            subject = f"Conway for Congress — Your Yard Sign Delivery Route"
+            vol_email = vol.get("email", "")
+
+            with st.expander(f"📧 {vol['name']} — {vol_email if vol_email else 'no email on file'}", expanded=True):
+                if vol_email:
+                    mailto = mailto_link(vol_email, subject, email_body)
+                    st.markdown(
+                        f'<a href="{mailto}" style="display:inline-block;padding:10px 20px;'
+                        f'background:#2563eb;color:white;border-radius:8px;text-decoration:none;'
+                        f'font-weight:600;font-size:14px;">✉️ Open in Mail App</a>',
+                        unsafe_allow_html=True
+                    )
+                    st.caption(f"Sends to: {vol_email}")
+                else:
+                    st.warning("No email address on file for this volunteer — add it in the Input tab.")
+
                 st.text_area(
-                    "Copy this email:",
-                    value=generate_email(r),
-                    height=350,
+                    "Or copy manually:",
+                    value=email_body,
+                    height=300,
                     key=f"email_{vol['name']}"
                 )
