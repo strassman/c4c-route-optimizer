@@ -212,7 +212,7 @@ def get_master_by_id(aid):
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
 
 tab_roster, tab_addresses, tab_run, tab_map, tab_routes, tab_emails = st.tabs([
-    "👥 Volunteers", "📋 All Addresses", "🚐 Delivery Run", "🗺️ Map", "📍 Routes", "📧 Emails"
+    "👥 Volunteers", "🗳️ Constituents", "🚐 Delivery Run", "🗺️ Map", "📍 Routes", "📧 Emails"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -338,8 +338,8 @@ with tab_roster:
 # TAB 2 — ALL ADDRESSES
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_addresses:
-    st.subheader("📋 All Addresses")
-    st.caption("Master list of every address. Updated automatically when stops are completed.")
+    st.subheader("🗳️ Constituents")
+    st.caption("Master list of every constituent. Updated automatically when stops are completed.")
 
     master = st.session_state.master_addresses
     delivered = [a for a in master if a.get("status") == "delivered"]
@@ -432,10 +432,28 @@ with tab_addresses:
                          "Status": st.column_config.TextColumn(width="small"),
                          "Date Delivered": st.column_config.TextColumn(width="medium"),
                      })
-        # Download button
-        csv_bytes = all_df.to_csv(index=False).encode()
-        st.download_button("⬇️ Export all as CSV", data=csv_bytes,
-                           file_name="c4c_all_addresses.csv", mime="text/csv")
+        # Download + delete
+        dl_col, del_col1, del_col2 = st.columns([3, 3, 1])
+        with dl_col:
+            csv_bytes = all_df.to_csv(index=False).encode()
+            st.download_button("⬇️ Export all as CSV", data=csv_bytes,
+                               file_name="c4c_constituents.csv", mime="text/csv")
+        with del_col1:
+            del_all_sel = st.selectbox("Delete a constituent", 
+                                       options=["—"] + [a.get("address","") for a in master],
+                                       key="del_all_sel")
+        with del_col2:
+            st.write("")
+            if st.button("🗑️ Delete", key="del_all_btn", use_container_width=True):
+                if del_all_sel != "—":
+                    st.session_state.master_addresses = [a for a in st.session_state.master_addresses if a.get("address") != del_all_sel]
+                    # Also remove from current run if present
+                    removed_ids = {a["id"] for a in master if a.get("address") == del_all_sel}
+                    st.session_state.run_address_ids = [rid for rid in st.session_state.run_address_ids if rid not in removed_ids]
+                    save_data("master_addresses", st.session_state.master_addresses)
+                    save_data("run_address_ids", st.session_state.run_address_ids)
+                    st.toast(f"Deleted: {del_all_sel}", icon="🗑️")
+                    st.rerun()
 
     st.divider()
 
