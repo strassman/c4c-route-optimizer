@@ -212,7 +212,7 @@ def get_master_by_id(aid):
 st.title("🗺️ Conway for Congress — Yard Sign Route Optimizer")
 
 tab_roster, tab_addresses, tab_run, tab_map, tab_routes, tab_emails = st.tabs([
-    "👥 Volunteers", "🗳️ Constituents", "🚐 Delivery Run", "🗺️ Map", "📍 Routes", "📧 Emails"
+    "👥 Volunteers", "🗳️ Constituents", "🚐 Delivery Run", "🗺️ Map", "📍 Routes", "📧 Emails & Texts"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -965,24 +965,77 @@ with tab_routes:
             st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — EMAILS
+# TAB 6 — EMAILS & TEXTS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_emails:
     if not st.session_state.get("routes"):
         st.info("Run the optimizer first on the Delivery Run tab.")
     else:
-        st.subheader("📧 Volunteer Route Emails")
-        for r in st.session_state.routes:
-            vol = r["volunteer"]; ve = vol.get("email","")
+        routes = st.session_state.routes
+        subj = "Conway for Congress - Your Yard Sign Delivery Route"
+
+        st.subheader("📧 Emails & Texts")
+
+        # ── Email All button ──
+        all_emails = [r["volunteer"].get("email","") for r in routes if r["volunteer"].get("email","")]
+        if all_emails:
+            all_bodies = "\n\n---\n\n".join([generate_email(r) for r in routes])
+            all_to = ",".join(all_emails)
+            email_all_href = mailto_link(all_to, subj, all_bodies)
+            st.markdown(
+                f'<a href="{email_all_href}" style="display:inline-block;padding:12px 24px;'
+                f'background:#16a34a;color:white;border-radius:8px;text-decoration:none;'
+                f'font-weight:600;font-size:15px;margin-bottom:8px;">📧 Email All Volunteers</a>',
+                unsafe_allow_html=True
+            )
+            st.caption(f"Opens your mail app with all {len(all_emails)} volunteers in the To field")
+        else:
+            st.warning("No volunteer emails on file — add them in the Volunteers tab.")
+
+        st.divider()
+
+        # ── Per volunteer ──
+        for r in routes:
+            vol = r["volunteer"]
+            ve   = vol.get("email", "")
+            vp   = vol.get("phone", "").replace("-","").replace(" ","").replace("(","").replace(")","")
             body = generate_email(r)
-            subj = "Conway for Congress - Your Yard Sign Delivery Route"
-            with st.expander("Email for " + vol["name"] + " — " + (ve if ve else "no email on file"), expanded=True):
-                if ve:
-                    st.markdown(
-                        f'<a href="{mailto_link(ve, subj, body)}" style="display:inline-block;padding:10px 20px;'
-                        f'background:#2563eb;color:white;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;">'
-                        f'Open in Mail App</a>', unsafe_allow_html=True)
-                    st.caption(f"Sends to: {ve}")
-                else:
-                    st.warning("No email on file — add it in the Volunteers tab.")
-                st.text_area("Or copy manually:", value=body, height=300, key=f"email_{vol['name']}")
+
+            # Generate short text message
+            stops_text = "\n".join([f"  {i+1}. {s['address']}" for i,s in enumerate(r['stops'])])
+            text_body = (
+                f"Hi {vol['name']}! Conway for Congress here. "
+                f"You have {len(r['stops'])} yard sign stop{'s' if len(r['stops'])!=1 else ''} today:\n"
+                f"{stops_text}\n"
+                f"Full route details coming by email. Thank you!"
+            )
+            sms_href = f"sms:{vp}{'&' if vp else '?'}body={urllib.parse.quote(text_body)}"
+
+            with st.expander(f"{vol['name']} — {ve or 'no email'} · {vol.get('phone','no phone')}", expanded=True):
+                btn_col1, btn_col2 = st.columns(2)
+
+                with btn_col1:
+                    st.markdown("**📧 Email**")
+                    if ve:
+                        st.markdown(
+                            f'<a href="{mailto_link(ve, subj, body)}" style="display:inline-block;'
+                            f'padding:10px 20px;background:#2563eb;color:white;border-radius:8px;'
+                            f'text-decoration:none;font-weight:600;font-size:14px;">Open in Mail App</a>',
+                            unsafe_allow_html=True)
+                        st.caption(f"To: {ve}")
+                    else:
+                        st.warning("No email on file.")
+
+                with btn_col2:
+                    st.markdown("**💬 Text**")
+                    if vp:
+                        st.markdown(
+                            f'<a href="{sms_href}" style="display:inline-block;'
+                            f'padding:10px 20px;background:#16a34a;color:white;border-radius:8px;'
+                            f'text-decoration:none;font-weight:600;font-size:14px;">Open in Messages</a>',
+                            unsafe_allow_html=True)
+                        st.caption(f"To: {vol.get('phone','')}")
+                    else:
+                        st.warning("No phone on file.")
+
+                st.text_area("Email body (copy manually if needed):", value=body, height=250, key=f"email_{vol['name']}")
