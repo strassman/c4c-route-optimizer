@@ -542,94 +542,96 @@ with tab_run:
     st.subheader("🚐 Delivery Run Setup")
     col1, col2 = st.columns(2)
 
+    # ── LEFT: Volunteers ──
     with col1:
         st.markdown("**Who is available today?**")
         roster = st.session_state.volunteer_roster
-        if not roster:
+        named_roster = [v for v in roster if v.get("name")]
+
+        if not named_roster:
             st.info("No volunteers yet — add them in the Volunteers tab.")
         else:
-            # Check if we have a search address to sort by
-            search_addr = st.session_state.get("run_search", "")
-            sorted_roster = list(enumerate(roster))
+            # Name search filter
+            vol_search = st.text_input("🔍 Search volunteers by name", placeholder="Type a name...", key="vol_name_search")
+            filtered_roster = [v for v in named_roster
+                               if vol_search.lower() in v["name"].lower()] if vol_search else named_roster
 
-            if search_addr and len(search_addr) > 5:
-                # Geocode the search address and sort volunteers by proximity
-                slat, slng = geocode_address(search_addr)
-                if slat:
-                    def vol_dist(iv):
-                        i, v = iv
-                        vlat, vlng = geocode_address(v["address"]) if v.get("address") else (None, None)
-                        if vlat:
-                            return haversine((slat, slng), (vlat, vlng))
-                        return float("inf")
-                    sorted_roster = sorted(sorted_roster, key=vol_dist)
-                    st.caption("📍 Sorted by proximity to delivery address")
-                else:
-                    st.caption("Volunteers — check who is available")
-            else:
-                st.caption("Volunteers — check who is available. Type a delivery address to sort by proximity.")
+            if vol_search and not filtered_roster:
+                st.caption("No volunteers match that name.")
 
-            for i, v in sorted_roster:
-                if not v.get("name"): continue
-                checked = st.checkbox(
-                    f"**{v['name']}** — {v.get('address','no address')}",
-                    value=v["name"] in st.session_state.availability,
-                    key=f"avail_{i}"
-                )
-                if checked: st.session_state.availability.add(v["name"])
-                else: st.session_state.availability.discard(v["name"])
+            # Multiselect for volunteers
+            available_names = st.multiselect(
+                "Select available volunteers",
+                options=[v["name"] for v in filtered_roster],
+                default=[v["name"] for v in filtered_roster if v["name"] in st.session_state.availability],
+                key="vol_multiselect",
+                placeholder="Click to select volunteers for this run..."
+            )
+            st.session_state.availability = set(available_names)
 
+            # Show selected volunteer details
+            if available_names:
+                st.caption(f"**{len(available_names)} volunteer{'s' if len(available_names)!=1 else ''} selected:**")
+                for name in available_names:
+                    v = next((x for x in named_roster if x["name"]==name), None)
+                    if v:
+                        st.markdown(f"✅ **{v['name']}** — {v.get('address','')}")
+
+    # ── RIGHT: Addresses ──
     with col2:
         st.markdown("**Delivery Addresses for this Run**")
 
-        # Live autocomplete search
-        search_q = st.text_input("🔍 Search or add address", placeholder="Start typing a street name...", key="run_search")
-        if search_q and len(search_q) >= 2:
-            matches = [a for a in st.session_state.master_addresses
-                       if search_q.lower() in a["address"].lower()
-                       and a["id"] not in st.session_state.run_address_ids]
-            if matches:
-                st.caption(f"{len(matches)} match{'es' if len(matches)!=1 else ''} found:")
-                for match in matches[:8]:
-                    icon    = "✅" if match.get("status") == "delivered" else "⏳"
-                    contact = f" · {match['contact']}" if match.get("contact") else ""
-                    mc1, mc2 = st.columns([8, 1])
-                    with mc1:
-                        st.markdown(f"{icon} **{match['address']}**{contact}")
-                    with mc2:
-                        if st.button("＋ Add", key=f"sa_{match['id']}", use_container_width=True):
-                            st.session_state.run_address_ids.append(match["id"])
-                            save_data("run_address_ids", st.session_state.run_address_ids)
-                            st.rerun()
-            else:
-                # No match — offer to add as brand new
-                st.caption("No saved address matches. Add as new?")
-                if st.button(f"➕ Add \"{search_q}\" as new address", key="add_typed_new"):
-                    e = {"id": str(uuid.uuid4()), "address": search_q,
-                         "contact": "", "phone": "", "note": "", "status": "pending"}
-                    st.session_state.master_addresses.append(e)
-                    save_data("master_addresses", st.session_state.master_addresses)
-                    st.session_state.run_address_ids.append(e["id"])
-                    save_data("run_address_ids", st.session_state.run_address_ids)
-                    st.toast(f"Added: {search_q}", icon="📍")
-                    st.rerun()
+        # Build options from master addresses not yet in run
+        master = st.session_state.master_addresses
+        already_in_run = set(st.session_state.run_address_ids)
 
-        # Add new address
-        with st.expander("➕ Add new address", expanded=False):
+        # Multiselect from constituent list
+        addr_options = {a["address"]: a["id"] for a in master}
+        current_run_addrs = [a["address"] for a in master if a["id"] in already_in_run]
+
+        selected_addrs = st.multiselect(
+            "Select from saved constituents",
+            options=list(addr_options.keys()),
+            default=current_run_addrs,
+            key="addr_multiselect",
+            placeholder="Type to search and select addresses..."
+        )
+
+        # Sync multiselect back to run_address_ids
+        new_ids = [addr_options[addr] for addr in selected_addrs if addr in addr_options]
+        if new_ids != st.session_state.run_address_ids:
+            st.session_state.run_address_ids = new_ids
+            save_data("run_address_ids", st.session_state.run_address_ids)
+
+        st.divider()
+
+        # Add a brand new address not yet in the system
+        with st.expander("➕ Add new address not in system", expanded=False):
             c1, c2 = st.columns(2)
-            with c1: nr_a = st.text_input("Address*", key="nr_addr", placeholder="123 Oak St, Baltimore, MD")
-            with c2: nr_c = st.text_input("Contact", key="nr_contact")
-            nr_p = st.text_input("Phone", key="nr_phone")
-            nr_n = st.text_input("Note", key="nr_note", placeholder="e.g. leave at side door")
-            if st.button("Add to Run + Master List", type="primary", key="nr_add"):
-                if nr_a:
-                    e = {"id":str(uuid.uuid4()),"address":nr_a,"contact":nr_c,"phone":nr_p,"note":nr_n,"status":"pending"}
+            with c1:
+                nr_street = st.text_input("Street*", key="nr_street", placeholder="123 Oak St")
+                nr_contact = st.text_input("Contact", key="nr_contact")
+                nr_phone = st.text_input("Phone", key="nr_phone")
+            with c2:
+                nc1, nc2, nc3 = st.columns(3)
+                with nc1: nr_city  = st.text_input("City*",  key="nr_city",  placeholder="Baltimore")
+                with nc2: nr_state = st.text_input("State*", key="nr_state", placeholder="MD")
+                with nc3: nr_zip   = st.text_input("ZIP*",   key="nr_zip",   placeholder="21201")
+                nr_note = st.text_input("Note", key="nr_note", placeholder="e.g. leave at side door")
+            if st.button("Add to Run + Constituents", type="primary", key="nr_add"):
+                if nr_street and nr_city and nr_state and nr_zip:
+                    full_addr = f"{nr_street}, {nr_city}, {nr_state} {nr_zip}"
+                    e = {"id": str(uuid.uuid4()), "address": full_addr,
+                         "contact": nr_contact, "phone": nr_phone,
+                         "note": nr_note, "status": "pending"}
                     st.session_state.master_addresses.append(e)
                     save_data("master_addresses", st.session_state.master_addresses)
                     st.session_state.run_address_ids.append(e["id"])
                     save_data("run_address_ids", st.session_state.run_address_ids)
-                    st.toast(f"Added: {nr_a}", icon="📍")
+                    st.toast(f"Added: {full_addr}", icon="📍")
                     st.rerun()
+                else:
+                    st.warning("Street, city, state, and ZIP are required.")
 
         # Bulk import
         with st.expander("📋 Bulk import addresses", expanded=False):
@@ -638,7 +640,8 @@ with tab_run:
             if st.button("Import", key="run_bulk_btn"):
                 lines = [l.strip() for l in bulk.splitlines() if l.strip()]
                 for l in lines:
-                    e = {"id":str(uuid.uuid4()),"address":l,"contact":"","phone":"","note":"","status":"pending"}
+                    e = {"id": str(uuid.uuid4()), "address": l,
+                         "contact": "", "phone": "", "note": "", "status": "pending"}
                     st.session_state.master_addresses.append(e)
                     st.session_state.run_address_ids.append(e["id"])
                 save_data("master_addresses", st.session_state.master_addresses)
@@ -646,21 +649,11 @@ with tab_run:
                 st.toast(f"Imported {len(lines)} addresses", icon="📋")
                 st.rerun()
 
-        # Current run list
-        st.divider()
+        # Summary of current run
         run_addrs = [get_master_by_id(aid) for aid in st.session_state.run_address_ids]
         run_addrs = [a for a in run_addrs if a]
-        st.markdown(f"**Current run: {len(run_addrs)} stop{'s' if len(run_addrs)!=1 else ''}**")
-        for a in run_addrs:
-            c1, c2 = st.columns([8,1])
-            with c1:
-                icon = "✅" if a.get("status")=="delivered" else "⏳"
-                st.markdown(f"{icon} {a['address']}")
-            with c2:
-                if st.button("✕", key=f"rr_{a['id']}"):
-                    st.session_state.run_address_ids.remove(a["id"])
-                    save_data("run_address_ids", st.session_state.run_address_ids)
-                    st.rerun()
+        if run_addrs:
+            st.caption(f"**{len(run_addrs)} stop{'s' if len(run_addrs)!=1 else ''} in this run**")
 
     st.divider()
     c1, c2, c3 = st.columns(3)
