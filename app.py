@@ -316,7 +316,7 @@ with tab_roster:
             } for v in roster])
             edited = st.data_editor(df, use_container_width=True, hide_index=False,
                                     num_rows="fixed", key="roster_editor")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("💾 Save Changes", use_container_width=True):
                     updated = []
@@ -328,11 +328,18 @@ with tab_roster:
                     st.toast("Roster saved!", icon="💾")
             with c2:
                 del_idx = st.selectbox("Remove volunteer", options=["—"] + [v["name"] for v in roster], key="del_vol")
-                if st.button("🗑️ Remove", use_container_width=True):
+                if st.button("🗑️ Remove Selected", use_container_width=True):
                     if del_idx != "—":
                         st.session_state.volunteer_roster = [v for v in roster if v["name"] != del_idx]
                         save_data("volunteer_roster", st.session_state.volunteer_roster)
                         st.rerun()
+            with c3:
+                st.write("")
+                if st.button("🗑️ Clear All Volunteers", use_container_width=True, key="clear_all_vols"):
+                    st.session_state.volunteer_roster = []
+                    save_data("volunteer_roster", [])
+                    st.toast("All volunteers cleared!", icon="🗑️")
+                    st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — ALL ADDRESSES
@@ -433,27 +440,35 @@ with tab_addresses:
                          "Date Delivered": st.column_config.TextColumn(width="medium"),
                      })
         # Download + delete
-        dl_col, del_col1, del_col2 = st.columns([3, 3, 1])
+        dl_col, del_col1, del_col2, del_col3 = st.columns([2, 3, 1, 1])
         with dl_col:
             csv_bytes = all_df.to_csv(index=False).encode()
-            st.download_button("⬇️ Export all as CSV", data=csv_bytes,
+            st.download_button("⬇️ Export CSV", data=csv_bytes,
                                file_name="c4c_constituents.csv", mime="text/csv")
         with del_col1:
-            del_all_sel = st.selectbox("Delete a constituent", 
+            del_all_sel = st.selectbox("Delete a constituent",
                                        options=["—"] + [a.get("address","") for a in master],
                                        key="del_all_sel")
         with del_col2:
             st.write("")
             if st.button("🗑️ Delete", key="del_all_btn", use_container_width=True):
                 if del_all_sel != "—":
-                    st.session_state.master_addresses = [a for a in st.session_state.master_addresses if a.get("address") != del_all_sel]
-                    # Also remove from current run if present
                     removed_ids = {a["id"] for a in master if a.get("address") == del_all_sel}
+                    st.session_state.master_addresses = [a for a in st.session_state.master_addresses if a.get("address") != del_all_sel]
                     st.session_state.run_address_ids = [rid for rid in st.session_state.run_address_ids if rid not in removed_ids]
                     save_data("master_addresses", st.session_state.master_addresses)
                     save_data("run_address_ids", st.session_state.run_address_ids)
                     st.toast(f"Deleted: {del_all_sel}", icon="🗑️")
                     st.rerun()
+        with del_col3:
+            st.write("")
+            if st.button("🗑️ Clear All", key="clear_all_const", use_container_width=True):
+                st.session_state.master_addresses = []
+                st.session_state.run_address_ids = []
+                save_data("master_addresses", [])
+                save_data("run_address_ids", [])
+                st.toast("All constituents cleared!", icon="🗑️")
+                st.rerun()
 
     st.divider()
 
@@ -475,7 +490,7 @@ with tab_addresses:
             use_container_width=True, hide_index=True,
             num_rows="fixed", key="pending_editor"
         )
-        pc1, pc2, pc3 = st.columns(3)
+        pc1, pc2, pc3, pc4 = st.columns(4)
         with pc1:
             if st.button("💾 Save Pending Edits", use_container_width=True):
                 for i, row in pending_edited.iterrows():
@@ -505,6 +520,15 @@ with tab_addresses:
                     st.session_state.master_addresses = [a for a in st.session_state.master_addresses if a["address"]!=del_addr]
                     save_data("master_addresses", st.session_state.master_addresses)
                     st.rerun()
+        with pc4:
+            if st.button("🗑️ Clear All Pending", use_container_width=True, key="clear_pending"):
+                pending_ids = {a["id"] for a in pending}
+                st.session_state.master_addresses = [a for a in st.session_state.master_addresses if a["id"] not in pending_ids]
+                st.session_state.run_address_ids = [rid for rid in st.session_state.run_address_ids if rid not in pending_ids]
+                save_data("master_addresses", st.session_state.master_addresses)
+                save_data("run_address_ids", st.session_state.run_address_ids)
+                st.toast("All pending addresses cleared!", icon="🗑️")
+                st.rerun()
 
     st.divider()
 
@@ -526,14 +550,23 @@ with tab_addresses:
             delivered_df.drop(columns=["_id"]),
             use_container_width=True, hide_index=True
         )
-        undo_addr = st.selectbox("Undo delivery", options=["—"] + [a["address"] for a in delivered], key="undo_del_sel")
-        if st.button("↩️ Undo", use_container_width=False, key="undo_del_btn"):
-            if undo_addr != "—":
-                idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["address"]==undo_addr), None)
-                if idx is not None:
-                    st.session_state.master_addresses[idx]["status"] = "pending"
-                    save_data("master_addresses", st.session_state.master_addresses)
-                    st.rerun()
+        ud1, ud2 = st.columns(2)
+        with ud1:
+            undo_addr = st.selectbox("Undo delivery", options=["—"] + [a["address"] for a in delivered], key="undo_del_sel")
+            if st.button("↩️ Undo", use_container_width=True, key="undo_del_btn"):
+                if undo_addr != "—":
+                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["address"]==undo_addr), None)
+                    if idx is not None:
+                        st.session_state.master_addresses[idx]["status"] = "pending"
+                        save_data("master_addresses", st.session_state.master_addresses)
+                        st.rerun()
+        with ud2:
+            if st.button("🗑️ Clear All Delivered", use_container_width=True, key="clear_delivered"):
+                delivered_ids = {a["id"] for a in delivered}
+                st.session_state.master_addresses = [a for a in st.session_state.master_addresses if a["id"] not in delivered_ids]
+                save_data("master_addresses", st.session_state.master_addresses)
+                st.toast("All delivered addresses cleared!", icon="🗑️")
+                st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — DELIVERY RUN
@@ -551,25 +584,16 @@ with tab_run:
         if not named_roster:
             st.info("No volunteers yet — add them in the Volunteers tab.")
         else:
-            # Name search filter
-            vol_search = st.text_input("🔍 Search volunteers by name", placeholder="Type a name...", key="vol_name_search")
-            filtered_roster = [v for v in named_roster
-                               if vol_search.lower() in v["name"].lower()] if vol_search else named_roster
-
-            if vol_search and not filtered_roster:
-                st.caption("No volunteers match that name.")
-
             # Multiselect for volunteers
             available_names = st.multiselect(
                 "Select available volunteers",
-                options=[v["name"] for v in filtered_roster],
-                default=[v["name"] for v in filtered_roster if v["name"] in st.session_state.availability],
+                options=[v["name"] for v in named_roster],
+                default=[v["name"] for v in named_roster if v["name"] in st.session_state.availability],
                 key="vol_multiselect",
-                placeholder="Click to select volunteers for this run..."
+                placeholder="Click or type a name to select volunteers..."
             )
             st.session_state.availability = set(available_names)
 
-            # Show selected volunteer details
             if available_names:
                 st.caption(f"**{len(available_names)} volunteer{'s' if len(available_names)!=1 else ''} selected:**")
                 for name in available_names:
