@@ -298,14 +298,26 @@ def parse_csv(uploaded_file):
         })
     return results
 
-# ── Load data (scoped per campaign, only once per session) ────────────────────
+def load_all_data(campaign_id):
+    """Single Supabase query to fetch all campaign data at once."""
+    keys = ["volunteer_roster","master_addresses","run_address_ids","completed","route_history"]
+    scoped = [f"{campaign_id}_{k}" for k in keys]
+    try:
+        res = get_supabase().table("campaign_data").select("id,data").in_("id", scoped).execute()
+        lookup = {row["id"]: row["data"] for row in res.data}
+        return {k: lookup.get(f"{campaign_id}_{k}", []) for k in keys}
+    except:
+        return {k: [] for k in keys}
+
+# ── Load data (scoped per campaign, single query) ─────────────────────────────
 cid = st.session_state.get("campaign_id", "")
 if st.session_state.get("loaded_for") != cid:
-    st.session_state.volunteer_roster = load_data("volunteer_roster") or []
-    st.session_state.master_addresses = load_data("master_addresses") or []
-    st.session_state.run_address_ids  = load_data("run_address_ids")  or []
-    st.session_state.completed        = {c["key"]: c for c in (load_data("completed") or [])}
-    st.session_state.route_history    = load_data("route_history")    or []
+    all_data = load_all_data(cid)
+    st.session_state.volunteer_roster = all_data["volunteer_roster"] or []
+    st.session_state.master_addresses = all_data["master_addresses"] or []
+    st.session_state.run_address_ids  = all_data["run_address_ids"]  or []
+    st.session_state.completed        = {c["key"]: c for c in (all_data["completed"] or [])}
+    st.session_state.route_history    = all_data["route_history"]    or []
     st.session_state.routes           = st.session_state.route_history[0]["routes"] if st.session_state.route_history else []
     st.session_state.availability     = set()
     st.session_state.proximity_data   = None
