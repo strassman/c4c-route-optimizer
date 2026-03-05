@@ -558,66 +558,133 @@ with tab_run:
             st.toast(f"Routes ready — {len(del_results)} stops across {len(routes)} volunteers", icon="🗺️")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — MAP (always visible, shows all known pins)
+# TAB 4 — MAP
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_map:
-    master = st.session_state.master_addresses
+    master    = st.session_state.master_addresses
     completed = st.session_state.completed
-    routes = st.session_state.get("routes", [])
+    # routes only exist in session state for the person who just optimized
+    active_routes = st.session_state.get("routes", [])
 
-    # Default center: Baltimore
     center = [39.2904, -76.6122]
-    all_geocoded = [(a["lat"], a["lng"]) for a in master if a.get("lat") and a.get("lng")]
-
     m = folium.Map(location=center, zoom_start=11, tiles="CartoDB positron")
 
-    # Draw route lines if routes exist
-    for r in routes:
-        vol = r["volunteer"]
-        hex_c = r["hex"]; color = r["color"]
-        folium.Marker(
-            location=[vol["lat"], vol["lng"]],
-            popup=folium.Popup(f"<b>Home: {vol['name']}</b><br>{vol['address']}", max_width=220),
-            tooltip=f"Home: {vol['name']}",
-            icon=folium.Icon(color=color, icon="home", prefix="fa"),
-        ).add_to(m)
-        if r.get("road_geometry"):
-            folium.PolyLine(r["road_geometry"], color=hex_c, weight=4, opacity=0.7,
-                            tooltip=f"{vol['name']}: {r['distance_miles']} mi").add_to(m)
+    if active_routes:
+        # ── ACTIVE DELIVERY RUN VIEW ──
+        # Only shown to the user who just ran the optimizer (session state only)
+        # Show route lines + numbered stops for this run only
+        # No master address pins — just this run
+        all_lats, all_lngs = [], []
+        for r in active_routes:
+            vol   = r["volunteer"]
+            hex_c = r["hex"]
+            color = r["color"]
+            all_lats.append(vol["lat"]); all_lngs.append(vol["lng"])
 
-    # Draw all master address pins
-    for a in master:
-        # Try to geocode if no lat/lng stored yet
-        lat = a.get("lat"); lng = a.get("lng")
-        if not lat or not lng:
-            continue  # Only show geocoded pins
-        is_done = a.get("status") == "delivered"
-        note_html = f"<br><i>📝 {a['note']}</i>" if a.get("note") else ""
-        contact_html = f"<br>👤 {a['contact']}" if a.get("contact") else ""
-        date_html = f"<br>📅 {a['delivered_date']}" if a.get("delivered_date") else ""
-        if is_done:
             folium.Marker(
-                location=[lat, lng],
+                location=[vol["lat"], vol["lng"]],
+                popup=folium.Popup(f"<b>Home: {vol['name']}</b><br>{vol['address']}", max_width=220),
+                tooltip=f"Home: {vol['name']}",
+                icon=folium.Icon(color=color, icon="home", prefix="fa"),
+            ).add_to(m)
+
+            if r.get("road_geometry"):
+                folium.PolyLine(r["road_geometry"], color=hex_c, weight=4, opacity=0.8,
+                                tooltip=f"{vol['name']}: {r['distance_miles']} mi").add_to(m)
+
+            for i, stop in enumerate(r["stops"]):
+                prev   = vol["address"] if i == 0 else r["stops"][i-1]["address"]
+                key    = vol["name"] + "_" + str(i)
+                is_done = key in completed
+                note_html    = f"<br><i>📝 {stop['note']}</i>" if stop.get("note") else ""
+                contact_html = f"<br>👤 {stop['contact']}" if stop.get("contact") else ""
+                all_lats.append(stop["lat"]); all_lngs.append(stop["lng"])
+
+                if is_done:
+                    folium.Marker(
+                        location=[stop["lat"], stop["lng"]],
+                        popup=folium.Popup(f"<b>✅ Sign Placed</b><br>{stop['address']}{contact_html}{note_html}", max_width=230),
+                        tooltip=f"Sign placed — {stop['address']}",
+                        icon=folium.Icon(color="green", icon="check", prefix="fa"),
+                    ).add_to(m)
+                else:
+                    folium.Marker(
+                        location=[stop["lat"], stop["lng"]],
+                        popup=folium.Popup(
+                            f"<b>Stop {i+1} — {vol['name']}</b><br>{stop['address']}{contact_html}{note_html}<br>"
+                            f"<a href='{gmaps_dir(prev, stop['address'])}' target='_blank'>Get Directions</a>",
+                            max_width=250),
+                        tooltip=f"Stop {i+1} — {vol['name']}",
+                        icon=folium.DivIcon(
+                            html=f'<div style="background:white;color:{hex_c};border:2px solid {hex_c};border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:12px;box-shadow:0 2px 4px rgba(0,0,0,.25)">{i+1}</div>',
+                            icon_size=(26,26), icon_anchor=(13,13)),
+                    ).add_to(m)
+
+        if all_lats:
+            m.location = [sum(all_lats)/len(all_lats), sum(all_lngs)/len(all_lngs)]
+            m.zoom_start = 12
+
+        ca, cb, cc, _ = st.columns([1.2, 1, 1.5, 4])
+        ca.markdown('<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign placed', unsafe_allow_html=True)
+        cb.markdown('<span style="color:#aaa;font-size:20px;">&#9679;</span> Pending stop', unsafe_allow_html=True)
+        cc.markdown('<span style="color:#555;font-size:13px;">📍 Your active delivery run</span>', unsafe_allow_html=True)
+        if st.button("🗺️ Switch to master map view"):
+            st.session_state.routes = []
+            st.rerun()
+
+    else:
+        # ── DEFAULT MASTER MAP VIEW ──
+        # Geocode any addresses missing lat/lng and save them
+        needs_save = False
+        for i, a in enumerate(master):
+            if not a.get("lat") or not a.get("lng"):
+                lat, lng = geocode_address(a["address"])
+                if lat:
+                    st.session_state.master_addresses[i]["lat"] = lat
+                    st.session_state.master_addresses[i]["lng"] = lng
+                    needs_save = True
+        if needs_save:
+            save_data("master_addresses", st.session_state.master_addresses)
+
+        geocoded = [a for a in st.session_state.master_addresses if a.get("lat") and a.get("lng")]
+        delivered_pins = [a for a in geocoded if a.get("status") == "delivered"]
+        pending_pins   = [a for a in geocoded if a.get("status") != "delivered"]
+
+        if geocoded:
+            lats = [a["lat"] for a in geocoded]; lngs = [a["lng"] for a in geocoded]
+            m.location = [sum(lats)/len(lats), sum(lngs)/len(lngs)]
+            m.zoom_start = 12
+
+        for a in delivered_pins:
+            date_html    = f"<br>📅 {a['delivered_date']}" if a.get("delivered_date") else ""
+            contact_html = f"<br>👤 {a['contact']}" if a.get("contact") else ""
+            note_html    = f"<br>📝 {a['note']}" if a.get("note") else ""
+            folium.Marker(
+                location=[a["lat"], a["lng"]],
                 popup=folium.Popup(f"<b>✅ Sign Placed</b><br>{a['address']}{contact_html}{note_html}{date_html}", max_width=230),
                 tooltip=f"Sign placed — {a['address']}",
                 icon=folium.Icon(color="green", icon="check", prefix="fa"),
             ).add_to(m)
-        else:
+
+        for a in pending_pins:
+            contact_html = f"<br>👤 {a['contact']}" if a.get("contact") else ""
+            note_html    = f"<br>📝 {a['note']}" if a.get("note") else ""
             folium.CircleMarker(
-                location=[lat, lng],
-                radius=7, color="#aaa", fill=True, fill_color="#ccc", fill_opacity=0.8,
+                location=[a["lat"], a["lng"]],
+                radius=8, color="#888", fill=True, fill_color="#bbb", fill_opacity=0.9,
                 popup=folium.Popup(f"<b>⏳ Pending</b><br>{a['address']}{contact_html}{note_html}", max_width=230),
                 tooltip=f"Pending — {a['address']}",
             ).add_to(m)
 
-    # Legend
-    ca, cb, _ = st.columns([1,1,6])
-    ca.markdown('<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign placed', unsafe_allow_html=True)
-    cb.markdown('<span style="color:#aaa;font-size:20px;">&#9679;</span> Pending', unsafe_allow_html=True)
+        ca, cb, _ = st.columns([1, 1, 6])
+        ca.markdown('<span style="color:#27ae60;font-size:20px;">&#9679;</span> Sign placed', unsafe_allow_html=True)
+        cb.markdown('<span style="color:#888;font-size:20px;">&#9679;</span> Pending', unsafe_allow_html=True)
+
+        if not master:
+            st.info("No addresses yet. Add some in the All Addresses or Delivery Run tab.")
+
     st_folium(m, use_container_width=True, height=580)
 
-    if not master:
-        st.info("No addresses yet. Add some in the All Addresses or Delivery Run tab.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — ROUTES (full history, delete button per run)
