@@ -413,58 +413,83 @@ with tab_addresses:
 
     st.divider()
 
-    # ── Pending ──
+    # ── Pending spreadsheet ──
     st.markdown(f"### ⏳ Pending — {len(pending)} address{'es' if len(pending)!=1 else ''}")
     if not pending:
         st.info("No pending addresses.")
     else:
-        for a in pending:
-            with st.container(border=True):
-                c1, c2, c3 = st.columns([5, 2, 1])
-                with c1:
-                    st.markdown(f"**{a['address']}**")
-                    det = []
-                    if a.get("contact"): det.append(f"👤 {a['contact']}")
-                    if a.get("phone"):   det.append(f"📞 {a['phone']}")
-                    if a.get("note"):    det.append(f"📝 {a['note']}")
-                    if det: st.caption(" · ".join(det))
-                with c2:
-                    if st.button("Mark Delivered", key=f"md_{a['id']}"):
-                        idx = next(i for i,x in enumerate(st.session_state.master_addresses) if x["id"]==a["id"])
+        pending_df = pd.DataFrame([{
+            "Address":  a.get("address",""),
+            "Contact":  a.get("contact",""),
+            "Phone":    a.get("phone",""),
+            "Email":    a.get("email",""),
+            "Note":     a.get("note",""),
+            "_id":      a.get("id",""),
+        } for a in pending])
+        pending_edited = st.data_editor(
+            pending_df.drop(columns=["_id"]),
+            use_container_width=True, hide_index=True,
+            num_rows="fixed", key="pending_editor"
+        )
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            if st.button("💾 Save Pending Edits", use_container_width=True):
+                for i, row in pending_edited.iterrows():
+                    mid = pending_df.iloc[i]["_id"]
+                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["id"]==mid), None)
+                    if idx is not None:
+                        st.session_state.master_addresses[idx].update({
+                            "address": row["Address"], "contact": row["Contact"],
+                            "phone": row["Phone"], "email": row["Email"], "note": row["Note"]
+                        })
+                save_data("master_addresses", st.session_state.master_addresses)
+                st.toast("Pending list saved!", icon="💾")
+        with pc2:
+            mark_addr = st.selectbox("Mark as delivered", options=["—"] + [a["address"] for a in pending], key="mark_del_sel")
+            if st.button("✅ Mark Delivered", use_container_width=True):
+                if mark_addr != "—":
+                    idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["address"]==mark_addr), None)
+                    if idx is not None:
                         st.session_state.master_addresses[idx]["status"] = "delivered"
                         st.session_state.master_addresses[idx]["delivered_date"] = datetime.now().strftime("%b %d, %Y")
                         save_data("master_addresses", st.session_state.master_addresses)
                         st.rerun()
-                with c3:
-                    if st.button("✕", key=f"mdel_{a['id']}"):
-                        st.session_state.master_addresses = [x for x in st.session_state.master_addresses if x["id"]!=a["id"]]
-                        save_data("master_addresses", st.session_state.master_addresses)
-                        st.rerun()
+        with pc3:
+            del_addr = st.selectbox("Remove address", options=["—"] + [a["address"] for a in pending], key="del_pend_sel")
+            if st.button("🗑️ Remove", use_container_width=True, key="del_pend_btn"):
+                if del_addr != "—":
+                    st.session_state.master_addresses = [a for a in st.session_state.master_addresses if a["address"]!=del_addr]
+                    save_data("master_addresses", st.session_state.master_addresses)
+                    st.rerun()
 
     st.divider()
 
-    # ── Delivered ──
+    # ── Delivered spreadsheet ──
     st.markdown(f"### ✅ Signs Placed — {len(delivered)} address{'es' if len(delivered)!=1 else ''}")
     if not delivered:
         st.info("No signs placed yet.")
     else:
-        for a in delivered:
-            with st.container(border=True):
-                c1, c2 = st.columns([8, 1])
-                with c1:
-                    date_text = f" · 📅 {a['delivered_date']}" if a.get("delivered_date") else ""
-                    st.markdown(f"✅ **{a['address']}**{date_text}")
-                    det = []
-                    if a.get("contact"): det.append(f"👤 {a['contact']}")
-                    if a.get("phone"):   det.append(f"📞 {a['phone']}")
-                    if a.get("note"):    det.append(f"📝 {a['note']}")
-                    if det: st.caption(" · ".join(det))
-                with c2:
-                    if st.button("Undo", key=f"mu_{a['id']}"):
-                        idx = next(i for i,x in enumerate(st.session_state.master_addresses) if x["id"]==a["id"])
-                        st.session_state.master_addresses[idx]["status"] = "pending"
-                        save_data("master_addresses", st.session_state.master_addresses)
-                        st.rerun()
+        delivered_df = pd.DataFrame([{
+            "Address":        a.get("address",""),
+            "Contact":        a.get("contact",""),
+            "Phone":          a.get("phone",""),
+            "Email":          a.get("email",""),
+            "Date Delivered": a.get("delivered_date",""),
+            "Note":           a.get("note",""),
+            "_id":            a.get("id",""),
+        } for a in delivered])
+        st.dataframe(
+            delivered_df.drop(columns=["_id"]),
+            use_container_width=True, hide_index=True
+        )
+        undo_addr = st.selectbox("Undo delivery", options=["—"] + [a["address"] for a in delivered], key="undo_del_sel")
+        if st.button("↩️ Undo", use_container_width=False, key="undo_del_btn"):
+            if undo_addr != "—":
+                idx = next((j for j,a in enumerate(st.session_state.master_addresses) if a["address"]==undo_addr), None)
+                if idx is not None:
+                    st.session_state.master_addresses[idx]["status"] = "pending"
+                    save_data("master_addresses", st.session_state.master_addresses)
+                    st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — DELIVERY RUN
@@ -479,10 +504,34 @@ with tab_run:
         if not roster:
             st.info("No volunteers yet — add them in the Volunteers tab.")
         else:
-            for i, v in enumerate(roster):
+            # Check if we have a search address to sort by
+            search_addr = st.session_state.get("run_search", "")
+            sorted_roster = list(enumerate(roster))
+
+            if search_addr and len(search_addr) > 5:
+                # Geocode the search address and sort volunteers by proximity
+                slat, slng = geocode_address(search_addr)
+                if slat:
+                    def vol_dist(iv):
+                        i, v = iv
+                        vlat, vlng = geocode_address(v["address"]) if v.get("address") else (None, None)
+                        if vlat:
+                            return haversine((slat, slng), (vlat, vlng))
+                        return float("inf")
+                    sorted_roster = sorted(sorted_roster, key=vol_dist)
+                    st.caption("📍 Sorted by proximity to delivery address")
+                else:
+                    st.caption("Volunteers — check who is available")
+            else:
+                st.caption("Volunteers — check who is available. Type a delivery address to sort by proximity.")
+
+            for i, v in sorted_roster:
                 if not v.get("name"): continue
-                checked = st.checkbox(f"**{v['name']}** — {v.get('address','no address')}",
-                                      value=v["name"] in st.session_state.availability, key=f"avail_{i}")
+                checked = st.checkbox(
+                    f"**{v['name']}** — {v.get('address','no address')}",
+                    value=v["name"] in st.session_state.availability,
+                    key=f"avail_{i}"
+                )
                 if checked: st.session_state.availability.add(v["name"])
                 else: st.session_state.availability.discard(v["name"])
 
