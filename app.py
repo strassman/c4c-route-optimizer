@@ -8,6 +8,7 @@ import math
 import requests
 import urllib.parse
 import uuid
+from datetime import datetime
 from supabase import create_client
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -260,6 +261,7 @@ with tab_addresses:
                     if st.button("Mark Delivered", key=f"mdeliv_{a['id']}"):
                         idx = next(i for i,x in enumerate(st.session_state.master_addresses) if x["id"] == a["id"])
                         st.session_state.master_addresses[idx]["status"] = "delivered"
+                        st.session_state.master_addresses[idx]["delivered_date"] = datetime.now().strftime("%b %d, %Y")
                         save_data("master_addresses", st.session_state.master_addresses)
                         st.rerun()
                 with c3:
@@ -279,7 +281,9 @@ with tab_addresses:
             with st.container(border=True):
                 c1, c2 = st.columns([7, 1])
                 with c1:
-                    st.markdown(f"✅ **{a['address']}**")
+                    delivered_date = a.get("delivered_date", "")
+                    date_text = f" · 📅 {delivered_date}" if delivered_date else ""
+                    st.markdown(f"✅ **{a['address']}**{date_text}")
                     details = []
                     if a.get("contact"): details.append(f"👤 {a['contact']}")
                     if a.get("phone"):   details.append(f"📞 {a['phone']}")
@@ -470,8 +474,7 @@ with tab_run:
                         })
 
                 st.session_state.routes = routes
-                st.success(f"Optimized {len(del_results)} deliveries across {len(routes)} volunteers!")
-                st.balloons()
+                st.toast(f"✅ Routes ready — {len(del_results)} deliveries across {len(routes)} volunteers", icon="🗺️")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — MAP
@@ -563,7 +566,8 @@ with tab_routes:
                         if checked and not is_done:
                             # Mark completed in routes tracker
                             st.session_state.completed[key] = {"key": key, "address": s["address"],
-                                "lat": s["lat"], "lng": s["lng"], "volunteer": vol_name, "stop_num": i+1}
+                                "lat": s["lat"], "lng": s["lng"], "volunteer": vol_name, "stop_num": i+1,
+                                "delivered_date": datetime.now().strftime("%b %d, %Y")}
                             save_data("completed", list(st.session_state.completed.values()))
                             # Also update master address status to delivered
                             if s.get("id"):
@@ -585,7 +589,9 @@ with tab_routes:
                         note_text = f" — *{s['note']}*" if s.get("note") else ""
                         contact_text = f" · 👤 {s['contact']}" if s.get("contact") else ""
                         if is_done:
-                            st.markdown(f"~~**Stop {i+1}:** {s['address']}~~ ✅{contact_text}{note_text}")
+                            delivered_date = completed[key].get("delivered_date", "")
+                            date_text = f" · 📅 {delivered_date}" if delivered_date else ""
+                            st.markdown(f"~~**Stop {i+1}:** {s['address']}~~ ✅{contact_text}{note_text}{date_text}")
                         else:
                             st.markdown(f"**Stop {i+1}:** {s['address']}{contact_text}{note_text}")
                         st.markdown(f"[Get Directions]({gmaps_dir(prev, s['address'])})")
